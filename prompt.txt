@@ -1,17 +1,27 @@
 
 You are an expert Golang automation engineer using Go Rod. 
-Generate a robust, production-ready script based on the user's semantic session history below.
+Generate a robust, production-ready script based on the semantic session history.
 
 SEMANTIC CONTEXT:
 [
   {
-    "sequence_id": 1,
-    "action_type": "input",
+    "seq": 1,
+    "type": "navigate",
+    "target": {
+      "tag": "",
+      "sel": "window"
+    },
+    "rank": "High",
+    "val": "https://www.google.com/?pli=1"
+  },
+  {
+    "seq": 2,
+    "type": "input",
     "target": {
       "tag": "textarea",
       "text": "Search",
-      "selector": "#APjFqb",
-      "attributes": {
+      "sel": "#APjFqb",
+      "attr": {
         "class": "gLFyf",
         "id": "APjFqb",
         "name": "q",
@@ -19,65 +29,35 @@ SEMANTIC CONTEXT:
         "role": "combobox"
       }
     },
-    "input_value": "best sushi restaurants in nyc",
-    "interaction_rank": "High",
-    "new_elements_appeared": null
+    "rank": "High",
+    "val": "new age gadgets for pets"
   },
   {
-    "sequence_id": 30,
-    "action_type": "click",
+    "seq": 29,
+    "type": "navigate",
     "target": {
-      "tag": "textarea",
-      "text": "Search",
-      "selector": "#APjFqb",
-      "attributes": {
-        "class": "gLFyf",
-        "id": "APjFqb",
-        "name": "q",
-        "placeholder": "",
-        "role": "combobox"
-      }
+      "tag": "",
+      "sel": "window"
     },
-    "interaction_rank": "High",
-    "new_elements_appeared": null
-  },
-  {
-    "sequence_id": 31,
-    "action_type": "input",
-    "target": {
-      "tag": "textarea",
-      "text": "Search",
-      "selector": "#APjFqb",
-      "attributes": {
-        "class": "gLFyf",
-        "id": "APjFqb",
-        "name": "q",
-        "placeholder": "",
-        "role": "combobox"
-      }
-    },
-    "interaction_rank": "High",
-    "new_elements_appeared": null
-  },
-  {
-    "sequence_id": 41,
-    "action_type": "keypress",
-    "target": {
-      "tag": "unknown",
-      "selector": "#APjFqb"
-    },
-    "input_value": "Enter",
-    "interaction_rank": "Low",
-    "new_elements_appeared": null
+    "rank": "High",
+    "val": "https://www.google.com/search?q=new+age+gadgets+for+pets\u0026sca_esv=2bc7513dd8de01bf\u0026sxsrf=AE3TifMtfG-T3GEO8HsStnH87RaUw4UR3w%3A1767631896286\u0026source=hp\u0026ei=GOxbad3dD8vgseMP4Y6f6A4\u0026iflsig=AOw8s4IAAAAAaVv6KF3Hd1-SFEB4yUZFHHq8clyT0LQE\u0026ved=0ahUKEwjdyZT67fSRAxVLcGwGHWHHB-0Q4dUDCB8\u0026uact=5\u0026oq=new+age+gadgets+for+pets\u0026gs_lp=Egdnd3Mtd2l6IhhuZXcgYWdlIGdhZGdldHMgZm9yIHBldHMyBRAhGKABSO6FBlDGqAVYloEGcAJ4AJABAJgBnQGgAdQUqgEFMTIuMTO4AQPIAQD4AQGYAhugAsEVqAIKwgIHECMY6gIYJ8ICBBAjGCfCAgQQLhgnwgILEAAYgAQYigUYkQLCAgsQABiABBixAxiDAcICCBAAGIAEGLEDwgIOEAAYgAQYigUYsQMYgwHCAgUQABiABMICCxAuGIAEGMcBGNEDwgIQEAAYgAQYigUYQxixAxiDAcICChAAGIAEGIoFGEPCAhYQLhiABBiKBRhDGLEDGIMBGMcBGNEDwgIKEAAYgAQYFBiHAsICExAAGIAEGIoFGEMYsQMYgwEYyQPCAhMQLhiABBiKBRhDGLEDGMcBGNEDwgILEAAYgAQYigUYkgPCAg0QABiABBiKBRhDGLEDwgILEC4YrwEYxwEYgATCAg4QLhiABBjHARivARiOBcICCxAuGIAEGMcBGK8BwgIOEC4YrwEYxwEYyQMYgATCAgYQABgWGB7CAgsQABiABBiKBRiGA8ICBRAAGO8FwgIEECEYFZgDDpIHBTEwLjE3oAeWnAGyBwQ4LjE3uAewFcIHCDQuMTUuNy4xyAdDgAgB\u0026sclient=gws-wiz"
   }
 ]
 
-CRITICAL RULES FOR ROBUSTNESS:
-1. Handle Navigation: When you see 'action_type: navigate', use 'page = browser.MustPage("url")' or 'page.MustNavigate("url").MustWaitLoad()'.
-2. Wait for Visibility: Never click blindly. Always chain '.MustWaitVisible()' before interacting. 
-   - BAD: page.MustElement("#submit").MustClick()
-   - GOOD: page.MustElement("#submit").MustWaitVisible().MustClick()
-3. Wait for Stability: If an element might be animating (like a dropdown), use '.MustWaitStable()'.
-4. Smart Selectors: If the selector looks complex (e.g. div:nth-child...), prefer searching by text using 'page.MustElementR("tag", "text content")'.
+---
+
+### SUB-TASK: VARIABLE ABSTRACTION
+I have performed a semantic analysis on the user inputs (see the 'nlp' field in the JSON).
+1. Look at 'nlp.tokens'.
+2. If a token has a 'b' (bucket) field, it is a VARIABLE.
+3. DO NOT hardcode these values. Create a Go function signature accepting these variables.
+   - Example JSON: {"t": "sushi", "b": "cuisineType"}
+   - Result: func Search(cuisineType string) { ... }
+
+### CRITICAL RULES FOR ROBUSTNESS:
+1. **Handle Navigation**: 'action_type: navigate' -> 'page.MustNavigate("url").MustWaitLoad()'.
+2. **Wait for Visibility**: Always chain '.MustWaitVisible()' before clicking or typing.
+3. **Wait for Stability**: Use '.MustWaitStable()' for animations.
+4. **Debouncing**: The JSON inputs are already debounced. Use the final value provided.
 
 Output ONLY the Go code.
