@@ -1,0 +1,68 @@
+[
+  {
+    "sequence_id": 1,
+    "action_type": "input",
+    "target": {
+      "tag": "textarea",
+      "text": "Search",
+      "selector": "#APjFqb",
+      "attributes": {
+        "class": "gLFyf",
+        "id": "APjFqb",
+        "name": "q",
+        "placeholder": "",
+        "role": "combobox"
+      }
+    },
+    "input_value": "best sushi restaurants in nyc",
+    "interaction_rank": "High",
+    "new_elements_appeared": null
+  },
+  {
+    "sequence_id": 30,
+    "action_type": "click",
+    "target": {
+      "tag": "textarea",
+      "text": "Search",
+      "selector": "#APjFqb",
+      "attributes": {
+        "class": "gLFyf",
+        "id": "APjFqb",
+        "name": "q",
+        "placeholder": "",
+        "role": "combobox"
+      }
+    },
+    "interaction_rank": "High",
+    "new_elements_appeared": null
+  },
+  {
+    "sequence_id": 31,
+    "action_type": "input",
+    "target": {
+      "tag": "textarea",
+      "text": "Search",
+      "selector": "#APjFqb",
+      "attributes": {
+        "class": "gLFyf",
+        "id": "APjFqb",
+        "name": "q",
+        "placeholder": "",
+        "role": "combobox"
+      }
+    },
+    "interaction_rank": "High",
+    "new_elements_appeared": null
+  },
+  {
+    "sequence_id": 41,
+    "action_type": "keypress",
+    "target": {
+      "tag": "unknown",
+      "selector": "#APjFqb"
+    },
+    "input_value": "Enter",
+    "interaction_rank": "Low",
+    "new_elements_appeared": null
+  }
+]

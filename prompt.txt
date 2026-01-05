@@ -1,0 +1,83 @@
+
+You are an expert Golang automation engineer using Go Rod. 
+Generate a robust, production-ready script based on the user's semantic session history below.
+
+SEMANTIC CONTEXT:
+[
+  {
+    "sequence_id": 1,
+    "action_type": "input",
+    "target": {
+      "tag": "textarea",
+      "text": "Search",
+      "selector": "#APjFqb",
+      "attributes": {
+        "class": "gLFyf",
+        "id": "APjFqb",
+        "name": "q",
+        "placeholder": "",
+        "role": "combobox"
+      }
+    },
+    "input_value": "best sushi restaurants in nyc",
+    "interaction_rank": "High",
+    "new_elements_appeared": null
+  },
+  {
+    "sequence_id": 30,
+    "action_type": "click",
+    "target": {
+      "tag": "textarea",
+      "text": "Search",
+      "selector": "#APjFqb",
+      "attributes": {
+        "class": "gLFyf",
+        "id": "APjFqb",
+        "name": "q",
+        "placeholder": "",
+        "role": "combobox"
+      }
+    },
+    "interaction_rank": "High",
+    "new_elements_appeared": null
+  },
+  {
+    "sequence_id": 31,
+    "action_type": "input",
+    "target": {
+      "tag": "textarea",
+      "text": "Search",
+      "selector": "#APjFqb",
+      "attributes": {
+        "class": "gLFyf",
+        "id": "APjFqb",
+        "name": "q",
+        "placeholder": "",
+        "role": "combobox"
+      }
+    },
+    "interaction_rank": "High",
+    "new_elements_appeared": null
+  },
+  {
+    "sequence_id": 41,
+    "action_type": "keypress",
+    "target": {
+      "tag": "unknown",
+      "selector": "#APjFqb"
+    },
+    "input_value": "Enter",
+    "interaction_rank": "Low",
+    "new_elements_appeared": null
+  }
+]
+
+CRITICAL RULES FOR ROBUSTNESS:
+1. Handle Navigation: When you see 'action_type: navigate', use 'page = browser.MustPage("url")' or 'page.MustNavigate("url").MustWaitLoad()'.
+2. Wait for Visibility: Never click blindly. Always chain '.MustWaitVisible()' before interacting. 
+   - BAD: page.MustElement("#submit").MustClick()
+   - GOOD: page.MustElement("#submit").MustWaitVisible().MustClick()
+3. Wait for Stability: If an element might be animating (like a dropdown), use '.MustWaitStable()'.
+4. Smart Selectors: If the selector looks complex (e.g. div:nth-child...), prefer searching by text using 'page.MustElementR("tag", "text content")'.
+
+Output ONLY the Go code.

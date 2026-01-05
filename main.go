@@ -5,26 +5,24 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"sort"
 	"strings"
+	"unicode"
 )
 
-// ==================== 1. RRWeb & Data Structures ====================
+// ==================== 0. Constants & RRWeb Types ====================
 
 const (
-	EventFullSnapshot        = 2
-	EventIncrementalSnapshot = 3
-	EventMeta                = 4
-)
+	EventFullSnapshot = 2
+	EventIncremental  = 3
 
-const (
 	SourceMutation         = 0
 	SourceMouseInteraction = 2
 	SourceInput            = 5
-)
 
-const (
-	Click = 2
+	// Incremental Types
+	MutationAdd = 0 // implied for adds in this simplified struct
+	Click       = 2
+	Input       = 0 // Input event type in incremental data usually 0 or similar depending on version
 )
 
 type RRWebEvent struct {
@@ -33,535 +31,458 @@ type RRWebEvent struct {
 	Timestamp int64           `json:"timestamp"`
 }
 
-type Node struct {
+type FullSnapshotData struct {
+	Node *SerializedNode `json:"node"`
+}
+
+type IncrementalSnapshotData struct {
+	Source int            `json:"source"`
+	Type   int            `json:"type"` // Interaction type (click vs others)
+	ID     int            `json:"id"`   // Target ID for interaction
+	Text   string         `json:"text"` // For input events
+	Adds   []NodeAddition `json:"adds"` // For mutations
+}
+
+type NodeAddition struct {
+	ParentID int             `json:"parentId"`
+	Node     *SerializedNode `json:"node"`
+}
+
+// SerializedNode represents the raw node from RRWeb
+type SerializedNode struct {
 	ID          int                    `json:"id"`
 	Type        int                    `json:"type"`
 	TagName     string                 `json:"tagName"`
 	Attributes  map[string]interface{} `json:"attributes"`
-	ChildNodes  []Node                 `json:"childNodes"`
-	TextContent string                 `json:"textContent"`
+	ChildNodes  []*SerializedNode      `json:"childNodes"`
+	TextContent string                 `json:"textContent,omitempty"` // simplified
 }
 
-type FullSnapshotData struct {
-	Node Node `json:"node"`
+// ==================== 1. New Semantic Structures ====================
+
+type SemanticNode struct {
+	Tag        string                 `json:"tag"`
+	Text       string                 `json:"text,omitempty"`
+	Selector   string                 `json:"selector"`
+	Attributes map[string]interface{} `json:"attributes,omitempty"`
 }
 
-type IncrementalSnapshotData struct {
-	Source     int                 `json:"source"`
-	Type       int                 `json:"type"` // Interaction Type (Click, etc.)
-	ID         int                 `json:"id"`
-	Text       string              `json:"text"`      // Input text
-	IsChecked  bool                `json:"isChecked"` // Checkbox state
-	Adds       []AddedNode         `json:"adds"`
-	Removes    []RemovedNode       `json:"removes"`
-	Attributes []AttributeMutation `json:"attributes"`
+type SemanticEvent struct {
+	Seq     int            `json:"sequence_id"`
+	Type    string         `json:"action_type"`
+	Target  SemanticNode   `json:"target"`
+	Value   string         `json:"input_value,omitempty"`
+	Rank    string         `json:"interaction_rank"`
+	Context []SemanticNode `json:"new_elements_appeared"`
 }
 
-type AddedNode struct {
-	ParentID int  `json:"parentId"`
-	Node     Node `json:"node"`
-}
-
-type RemovedNode struct {
-	ParentID int `json:"parentId"`
-	ID       int `json:"id"`
-}
-
-type AttributeMutation struct {
-	ID         int                    `json:"id"`
-	Attributes map[string]interface{} `json:"attributes"`
-}
-
-type MetaData struct {
-	Href string `json:"href"`
-}
-
-// ==================== 2. Job Graph Structures ====================
-
-type JobType string
-
-const (
-	JobTypeNavigation  JobType = "navigation"
-	JobTypeInteraction JobType = "interaction" // Clicks
-	JobTypeInput       JobType = "input"       // Typing
-	JobTypeWait        JobType = "wait"        // Waiting for DOM
-)
-
-type Job struct {
-	ID           string
-	Type         JobType
-	Selector     string
-	Action       string
-	IsFixed      bool
-	FixedValue   string
-	VariableKey  string
-	Dependencies []string // IDs of jobs this depends on
-	Timestamp    int64
-}
-
-type JobGraph struct {
-	Jobs      map[string]*Job
-	Variables map[string]string // Key -> Description
-	Layers    [][]string        // Execution order
-}
-
-// ==================== 3. The "Perfect" Selector Engine ====================
-
-// NodeInfo stores the state of the DOM tree at any point in time
-type NodeInfo struct {
-	ID         int
-	TagName    string
-	Attributes map[string]interface{}
-	ParentID   int
-	Children   []int // Ordered list of child IDs for nth-of-type calculation
-}
+// ==================== 2. Enhanced Registry & Logic ====================
 
 type NodeRegistry struct {
-	nodes map[int]*NodeInfo
+	nodes   map[int]*SerializedNode
+	parents map[int]int
 }
 
 func NewNodeRegistry() *NodeRegistry {
 	return &NodeRegistry{
-		nodes: make(map[int]*NodeInfo),
+		nodes:   make(map[int]*SerializedNode),
+		parents: make(map[int]int),
 	}
 }
 
-// Register recursively adds nodes to the registry
-func (nr *NodeRegistry) Register(node Node, parentID int) {
-	info := &NodeInfo{
-		ID:         node.ID,
-		TagName:    strings.ToLower(node.TagName),
-		Attributes: node.Attributes,
-		ParentID:   parentID,
-		Children:   make([]int, 0),
-	}
-	nr.nodes[node.ID] = info
-
-	// Update parent's children list
-	if parent, ok := nr.nodes[parentID]; ok {
-		parent.Children = append(parent.Children, node.ID)
-	}
-
-	for _, child := range node.ChildNodes {
-		nr.Register(child, node.ID)
-	}
-}
-
-func (nr *NodeRegistry) Remove(id int) {
-	node, ok := nr.nodes[id]
-	if !ok {
+// Register adds a node and recursively registers children
+func (nr *NodeRegistry) Register(n *SerializedNode, parentID int) {
+	if n == nil {
 		return
 	}
-	// Remove from parent's children list
-	if parent, ok := nr.nodes[node.ParentID]; ok {
-		newChildren := make([]int, 0)
-		for _, childID := range parent.Children {
-			if childID != id {
-				newChildren = append(newChildren, childID)
-			}
-		}
-		parent.Children = newChildren
+	nr.nodes[n.ID] = n
+	if parentID != 0 {
+		nr.parents[n.ID] = parentID
 	}
-	delete(nr.nodes, id)
+	for _, child := range n.ChildNodes {
+		nr.Register(child, n.ID)
+	}
 }
 
-//func isGeneratedClass(className string) bool {
-//	// Logic: If the class is exactly 5-8 chars and alphanumeric, it's likely dynamic
-//	// e.g., "k1zIA" matches this.
-//	parts := strings.Fields(className)
-//	for _, p := range parts {
-//		if len(p) < 10 && containsNumbersAndLetters(p) {
-//			return true
-//		}
-//	}
-//	return false
-//}
+// containsNumbersAndLetters identifies dynamic/hash classes (e.g., "k1zIA")
+func containsNumbersAndLetters(s string) bool {
+	var hasL, hasN bool
+	for _, r := range s {
+		if unicode.IsLetter(r) {
+			hasL = true
+		}
+		if unicode.IsNumber(r) {
+			hasN = true
+		}
+	}
+	return hasL && hasN
+}
 
-// GetRobustSelector generates the most specific yet stable selector possible
-func (nr *NodeRegistry) GetRobustSelector(id int) string {
+func getStrAttr(attrs map[string]interface{}, key string) (string, bool) {
+	if val, ok := attrs[key]; ok {
+		if s, ok := val.(string); ok {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+func (nr *NodeRegistry) IsInteractable(id int) bool {
 	node, ok := nr.nodes[id]
 	if !ok {
-		return "body" // Fallback
+		return false
 	}
+	tag := strings.ToLower(node.TagName)
 
-	// Strategy 1: Unique ID (Gold Standard)
-	if val, ok := getStrAttr(node.Attributes, "id"); ok {
-		// Ensure ID is valid CSS (doesn't start with numbers, etc - simplified check)
-		if !strings.ContainsAny(val, " .:") {
-			return fmt.Sprintf("#%s", val)
-		}
+	// Direct interactable tags
+	if tag == "button" || tag == "a" || tag == "input" || tag == "select" || tag == "textarea" {
+		return true
 	}
-
-	// Strategy 2: Unique Name (Silver Standard for inputs)
-	if val, ok := getStrAttr(node.Attributes, "name"); ok {
-		return fmt.Sprintf("%s[name=%q]", node.TagName, val)
-	}
-
-	// Strategy 3: High-Value Attributes (Test IDs, Aria)
-	targetAttrs := []string{"data-testid", "data-test-id", "aria-label", "placeholder", "role"}
-	for _, attr := range targetAttrs {
-		if val, ok := getStrAttr(node.Attributes, attr); ok {
-			return fmt.Sprintf("%s[%s=%q]", node.TagName, attr, val)
-		}
-	}
-
-	// Strategy 4: Specific Classes (Bronze Standard)
-	// We avoid generic layout classes like "flex", "mt-4"
-	if val, ok := getStrAttr(node.Attributes, "class"); ok {
-		classes := strings.Fields(val)
-		validClasses := make([]string, 0)
-		for _, c := range classes {
-			if !isUtilityClass(c) {
-				validClasses = append(validClasses, "."+c)
-			}
-		}
-		// If we found specific classes, try to use them
-		if len(validClasses) > 0 && len(validClasses) <= 2 { // Don't chain too many
-			return fmt.Sprintf("%s%s", node.TagName, strings.Join(validClasses, ""))
-		}
-	}
-
-	return nr.GetStructuralPath(node.ParentID)
-
-	//// Strategy 5: Structural Fallback (The "Nth-Child" Hammer)
-	//// If all else fails, describe the path relative to the parent
-	//if node.ParentID != 0 {
-	//	parentSelector := nr.GetRobustSelector(node.ParentID)
-	//
-	//	// Calculate nth-of-type
-	//	index := 1
-	//	siblings := nr.nodes[node.ParentID].Children
-	//	for _, siblingID := range siblings {
-	//		if siblingID == id {
-	//			break
-	//		}
-	//		sibling, exists := nr.nodes[siblingID]
-	//		if exists && sibling.TagName == node.TagName {
-	//			index++
-	//		}
-	//	}
-	//
-	//	return fmt.Sprintf("%s > %s:nth-of-type(%d)", parentSelector, node.TagName, index)
-	//}
-
-	return node.TagName
-}
-
-// GetStructuralPath builds a selector from the element up to the body.
-// Example: html > body > div:nth-child(2) > div:nth-child(1) > button
-func (nr *NodeRegistry) GetStructuralPath(id int) string {
-	node, ok := nr.nodes[id]
-	if !ok || node.TagName == "" || node.TagName == "html" {
-		return "html"
-	}
-
-	if node.TagName == "body" {
-		return "body"
-	}
-
-	// 1. Get Parent
-	parent, exists := nr.nodes[node.ParentID]
-	if !exists {
-		return node.TagName
-	}
-
-	// 2. Calculate nth-child index
-	// We count all siblings (regardless of tag name) to get the exact index
-	index := 1
-	for _, siblingID := range parent.Children {
-		if siblingID == id {
-			break
-		}
-		index++
-	}
-
-	// 3. Recurse up the tree
-	parentPath := nr.GetStructuralPath(node.ParentID)
-
-	// 4. Return the combined path
-	// Only add :nth-child if there's a reason to (helps readability)
-	return fmt.Sprintf("%s > %s:nth-child(%d)", parentPath, node.TagName, index)
-}
-
-func isUtilityClass(c string) bool {
-	// Simple heuristic to ignore Tailwind/Bootstrap utility classes
-	prefixes := []string{"m-", "p-", "text-", "bg-", "flex", "grid", "w-", "h-", "d-", "col-"}
-	for _, p := range prefixes {
-		if strings.HasPrefix(c, p) {
+	// ARIA roles
+	if role, ok := getStrAttr(node.Attributes, "role"); ok {
+		if role == "button" || role == "link" || role == "checkbox" || role == "menuitem" {
 			return true
 		}
 	}
 	return false
 }
 
-func getStrAttr(attrs map[string]interface{}, key string) (string, bool) {
-	if val, ok := attrs[key]; ok {
-		if str, ok := val.(string); ok && str != "" {
-			return str, true
+// GetClickableTarget bubbles up from a specific node (like a generic span)
+// to find the nearest parent that is actually interactable (like a button).
+func (nr *NodeRegistry) GetClickableTarget(id int) int {
+	currID := id
+	// Traverse up max 5 levels to avoid infinite loops or going too high
+	for i := 0; i < 5; i++ {
+		if nr.IsInteractable(currID) {
+			return currID
+		}
+		parentID, ok := nr.parents[currID]
+		if !ok || parentID == 0 {
+			break
+		}
+		currID = parentID
+	}
+	// If no interactable parent found, return original ID (best effort)
+	return id
+}
+
+// GetRobustSelector generates a Go Rod-friendly selector, preferring IDs,
+// then stable classes, then falling back to tag structure.
+func (nr *NodeRegistry) GetRobustSelector(id int) string {
+	node, ok := nr.nodes[id]
+	if !ok {
+		return ""
+	}
+
+	// 1. Try ID (if it looks stable)
+	if idVal, ok := getStrAttr(node.Attributes, "id"); ok {
+		if !containsNumbersAndLetters(idVal) {
+			return fmt.Sprintf("#%s", idVal)
 		}
 	}
-	return "", false
+
+	// 2. Try Classes (filtering out dynamic hashes)
+	if classVal, ok := getStrAttr(node.Attributes, "class"); ok {
+		classes := strings.Split(classVal, " ")
+		var stableClasses []string
+		for _, c := range classes {
+			c = strings.TrimSpace(c)
+			if c != "" && !containsNumbersAndLetters(c) {
+				stableClasses = append(stableClasses, "."+c)
+			}
+		}
+		if len(stableClasses) > 0 {
+			// Join stable classes. Using just the first distinct one is often safer for Rod
+			// unless specificity is needed, but let's join all stable ones for now.
+			return strings.Join(stableClasses, "")
+		}
+	}
+
+	// 3. Fallback: Tag + Attribute Text (simplified XPath-like logic for LLM)
+	// For the LLM context, sometimes just "button[text='Submit']" is better than a CSS selector.
+	// We will return a basic Tag representation here.
+	return node.TagName
 }
 
-// ==================== 4. The Graph Builder Logic ====================
+// CalculateInteractionRank determines how "standard" an interaction is.
+// High: Native interactive elements (buttons, links, inputs).
+// Medium: Generic elements masking as interactive (ARIA roles, "btn" classes).
+// Low: Generic containers (divs, spans) with no semantic hints.
+func (nr *NodeRegistry) CalculateInteractionRank(id int) string {
+	node, ok := nr.nodes[id]
+	if !ok {
+		return "Low"
+	}
 
-type JobGraphBuilder struct {
-	registry   *NodeRegistry
-	graph      *JobGraph
-	jobCounter int
-	baseURL    string
+	tag := strings.ToLower(node.TagName)
+	attrs := node.Attributes
+
+	// 1. High Confidence: Native Interactive Tags
+	if tag == "button" || tag == "a" || tag == "select" || tag == "textarea" || tag == "input" {
+		return "High"
+	}
+
+	// 2. Medium Confidence: ARIA Roles & Semantic Classes
+	if role, ok := getStrAttr(attrs, "role"); ok {
+		if role == "button" || role == "link" || role == "menuitem" || role == "checkbox" {
+			return "Medium"
+		}
+	}
+
+	// Check for "cursor: pointer" style (common indicator of clickability)
+	if style, ok := getStrAttr(attrs, "style"); ok {
+		if strings.Contains(style, "cursor: pointer") {
+			return "Medium"
+		}
+	}
+
+	// Check for "btn" or "button" in class names (heuristic)
+	if class, ok := getStrAttr(attrs, "class"); ok {
+		classLower := strings.ToLower(class)
+		if strings.Contains(classLower, "btn") || strings.Contains(classLower, "button") || strings.Contains(classLower, "clickable") {
+			return "Medium"
+		}
+	}
+
+	// 3. Low Confidence: Everything else (div, span, img)
+	return "Low"
 }
 
-func NewJobGraphBuilder() *JobGraphBuilder {
-	return &JobGraphBuilder{
+// ==================== 3. The Semantic Graph Builder ====================
+
+type SemanticBuilder struct {
+	registry       *NodeRegistry
+	events         []SemanticEvent
+	mutationBuffer []SemanticNode
+	eventCounter   int
+}
+
+func NewSemanticBuilder() *SemanticBuilder {
+	return &SemanticBuilder{
 		registry: NewNodeRegistry(),
-		graph: &JobGraph{
-			Jobs:      make(map[string]*Job),
-			Variables: make(map[string]string),
-		},
+		events:   []SemanticEvent{},
 	}
 }
 
-func (b *JobGraphBuilder) ProcessEvents(events []RRWebEvent) {
-	log.Println("⚙️ Processing events to build Semantic Job Graph...")
+func (b *SemanticBuilder) Process(events []RRWebEvent) {
+	for _, e := range events {
+		// 1. Handle Full Snapshots (Initial Page Load)
+		if e.Type == EventFullSnapshot {
+			var fs FullSnapshotData
+			if err := json.Unmarshal(e.Data, &fs); err == nil {
+				b.registry.Register(fs.Node, 0)
+			}
+			continue
+		}
 
-	for _, event := range events {
-		switch event.Type {
-		case EventMeta:
-			var data MetaData
-			json.Unmarshal(event.Data, &data)
-			b.baseURL = data.Href
-			b.addJob(&Job{
-				Type:       JobTypeNavigation,
-				Action:     "navigate",
-				IsFixed:    true,
-				FixedValue: data.Href,
-				Timestamp:  event.Timestamp,
-			})
-
-		case EventFullSnapshot:
-			var data FullSnapshotData
-			json.Unmarshal(event.Data, &data)
-			b.registry.Register(data.Node, 0)
-
-		case EventIncrementalSnapshot:
+		// 2. Handle Incremental Events (Mutations & Interactions)
+		if e.Type == EventIncremental {
 			var data IncrementalSnapshotData
-			json.Unmarshal(event.Data, &data)
+			if err := json.Unmarshal(e.Data, &data); err != nil {
+				continue
+			}
 
-			// 1. Handle DOM Mutations (Maintain Registry State)
+			// Capture Mutations (Context)
 			if data.Source == SourceMutation {
 				for _, add := range data.Adds {
-					b.registry.Register(add.Node, add.ParentID)
+					if add.Node != nil {
+						b.registry.Register(add.Node, add.ParentID)
+						// Only buffer "meaningful" new elements for the LLM
+						if b.registry.IsInteractable(add.Node.ID) {
+							b.mutationBuffer = append(b.mutationBuffer, b.toSemantic(add.Node.ID))
+						}
+					}
 				}
-				for _, rem := range data.Removes {
-					b.registry.Remove(rem.ID)
-				}
-				// Note: In a deeper implementation, we would create "Wait" jobs
-				// here if a mutation inserts a critical element we interact with later.
+				continue
 			}
 
-			// 2. Handle Interactions (Clicks)
-			if data.Source == SourceMouseInteraction && data.Type == Click {
-				selector := b.registry.GetRobustSelector(data.ID)
-				b.addJob(&Job{
-					Type:      JobTypeInteraction,
-					Selector:  selector,
-					Action:    "click",
-					IsFixed:   true,
-					Timestamp: event.Timestamp,
-				})
-			}
+			// Capture User Actions (Click or Input)
+			// Note: RRWeb Click type is usually 2, Input source is 5.
+			// Logic simplified here for demonstration.
+			isClick := data.Source == SourceMouseInteraction && data.Type == Click
+			isInput := data.Source == SourceInput
 
-			// 3. Handle Inputs (Typing)
-			if data.Source == SourceInput {
-				node, ok := b.registry.nodes[data.ID]
-				if !ok {
+			if isClick || isInput {
+				b.eventCounter++
+
+				actionType := "click"
+				if isInput {
+					actionType = "input"
+				}
+
+				// Bubble up to find the real clickable target (e.g., span -> button)
+				targetID := b.registry.GetClickableTarget(data.ID)
+
+				// Calculate Rank
+				rank := b.registry.CalculateInteractionRank(targetID)
+
+				evt := SemanticEvent{
+					Seq:     b.eventCounter,
+					Type:    actionType,
+					Target:  b.toSemantic(targetID),
+					Value:   data.Text,
+					Rank:    rank,
+					Context: b.mutationBuffer,
+				}
+
+				// 2. For Clicks, check for "Noise"
+				isLowConfidence := evt.Rank == "Low"
+				hasNoVisibleEffect := len(evt.Context) == 0
+
+				// If it's a generic div click that seemingly added nothing, skip it.
+				if isLowConfidence && hasNoVisibleEffect {
+					fmt.Printf("⚠️ Skipping Noise: Sequence %d (Low rank generic click)\n", evt.Seq)
+					b.mutationBuffer = []SemanticNode{} // Clear buffer
 					continue
 				}
 
-				inputType, _ := getStrAttr(node.Attributes, "type")
-				isStatic := data.IsChecked || inputType == "checkbox" || inputType == "radio"
-
-				job := &Job{
-					Type:      JobTypeInput,
-					Selector:  b.registry.GetRobustSelector(data.ID),
-					Action:    "input",
-					IsFixed:   isStatic,
-					Timestamp: event.Timestamp,
-				}
-
-				if isStatic {
-					job.FixedValue = "true" // Simplified for checkbox
-				} else {
-					// Semantic Variable Extraction
-					fieldName := extractFieldName(node.Attributes)
-					varKey := toCamelCase("Input " + fieldName)
-					job.VariableKey = varKey
-					b.graph.Variables[varKey] = fmt.Sprintf("Value for %s field", fieldName)
-				}
-				b.addJob(job)
+				b.events = append(b.events, evt)
+				b.mutationBuffer = []SemanticNode{} // Clear buffer after associating with an action
 			}
 		}
 	}
-	b.structureGraph()
 }
 
-func (b *JobGraphBuilder) addJob(job *Job) {
-	b.jobCounter++
-	job.ID = fmt.Sprintf("job_%03d", b.jobCounter)
-	b.graph.Jobs[job.ID] = job
-}
-
-// structureGraph builds dependencies and layers (Simple sequential logic for now)
-func (b *JobGraphBuilder) structureGraph() {
-	// Sort jobs by timestamp
-	var sortedJobs []*Job
-	for _, job := range b.graph.Jobs {
-		sortedJobs = append(sortedJobs, job)
+func (b *SemanticBuilder) toSemantic(id int) SemanticNode {
+	node, ok := b.registry.nodes[id]
+	if !ok {
+		return SemanticNode{Tag: "unknown", Selector: "unknown"}
 	}
-	sort.Slice(sortedJobs, func(i, j int) bool {
-		return sortedJobs[i].Timestamp < sortedJobs[j].Timestamp
-	})
 
-	// Create simplified layers
-	b.graph.Layers = make([][]string, 0)
-	for _, job := range sortedJobs {
-		b.graph.Layers = append(b.graph.Layers, []string{job.ID})
-	}
-}
-
-// ==================== 5. Code Generator ====================
-
-func GenerateGoRodScript(graph *JobGraph) string {
-	var sb strings.Builder
-
-	sb.WriteString(`package main
-
-import (
-	"github.com/go-rod/rod"
-	"github.com/go-rod/rod/lib/launcher"
-	"time"
-	"fmt"
-)
-
-`)
-
-	// Generate Struct for Variables
-	if len(graph.Variables) > 0 {
-		sb.WriteString("type AutomationInputs struct {\n")
-		for key, desc := range graph.Variables {
-			sb.WriteString(fmt.Sprintf("\t%s string // %s\n", key, desc))
+	// Helper to get text content (simplified)
+	text := node.TextContent
+	// If empty, check generic text attribute or label
+	if text == "" {
+		if t, ok := getStrAttr(node.Attributes, "placeholder"); ok {
+			text = t
 		}
-		sb.WriteString("}\n\n")
-	}
-
-	sb.WriteString("func main() {\n")
-	sb.WriteString("\t// 1. Setup Browser\n")
-	sb.WriteString("\turl := launcher.New().Headless(false).MustLaunch()\n")
-	sb.WriteString("\tbrowser := rod.New().ControlURL(url).MustConnect()\n")
-	sb.WriteString("\tdefer browser.MustClose()\n")
-	sb.WriteString("\tpage := browser.MustPage()\n\n")
-
-	// Inject Variables
-	if len(graph.Variables) > 0 {
-		sb.WriteString("\t// 2. Define Inputs (Replace these with real data)\n")
-		sb.WriteString("\tinputs := AutomationInputs{\n")
-		for key := range graph.Variables {
-			sb.WriteString(fmt.Sprintf("\t\t%s: \"SAMPLE_VALUE\",\n", key))
-		}
-		sb.WriteString("\t}\n\n")
-	}
-
-	sb.WriteString("\t// 3. Execute Graph\n")
-	for i, layer := range graph.Layers {
-		sb.WriteString(fmt.Sprintf("\t// --- Step %d ---\n", i+1))
-		for _, jobID := range layer {
-			job := graph.Jobs[jobID]
-			writeJobLogic(&sb, job)
+		if t, ok := getStrAttr(node.Attributes, "aria-label"); ok {
+			text = t
 		}
 	}
 
-	sb.WriteString("\n\tfmt.Println(\"✅ Automation Complete\")\n")
-	sb.WriteString("\ttime.Sleep(2 * time.Second)\n")
-	sb.WriteString("}\n")
-
-	return sb.String()
+	return SemanticNode{
+		Tag:        node.TagName,
+		Text:       text,
+		Selector:   b.registry.GetRobustSelector(id),
+		Attributes: node.Attributes,
+	}
 }
 
-func writeJobLogic(sb *strings.Builder, job *Job) {
-	switch job.Type {
-	case JobTypeNavigation:
-		sb.WriteString(fmt.Sprintf("\tpage.MustNavigate(%q).MustWaitLoad()\n", job.FixedValue))
-	case JobTypeInteraction:
-		sb.WriteString(fmt.Sprintf("\tpage.MustElement(%q).MustWaitVisible().MustClick()\n", job.Selector))
-	case JobTypeInput:
-		if job.IsFixed {
-			sb.WriteString(fmt.Sprintf("\tpage.MustElement(%q).MustWaitVisible().MustClick() // Toggle/Check\n", job.Selector))
-		} else {
-			sb.WriteString(fmt.Sprintf("\tpage.MustElement(%q).MustWaitVisible().MustInput(inputs.%s)\n", job.Selector, job.VariableKey))
+// CompressEvents reduces token usage by merging sequential inputs and cleaning attributes
+func (b *SemanticBuilder) CompressEvents() {
+	var compressed []SemanticEvent
+
+	// Whitelist of attributes useful for automation selectors
+	validAttrs := map[string]bool{
+		"id": true, "name": true, "class": true, "role": true,
+		"type": true, "placeholder": true, "href": true,
+	}
+
+	for i, evt := range b.events {
+		// 1. Clean Attributes
+		cleanedAttrs := make(map[string]interface{})
+		for k, v := range evt.Target.Attributes {
+			if validAttrs[k] {
+				cleanedAttrs[k] = v
+			}
 		}
+		evt.Target.Attributes = cleanedAttrs
+		evt.Context = nil // Aggressively remove mutation context if you want extreme savings
+
+		// 2. Input Debouncing Logic
+		if i > 0 {
+			prev := &compressed[len(compressed)-1]
+
+			// If current and previous are both INPUTs on the SAME target
+			if prev.Type == "input" && evt.Type == "input" && prev.Target.Selector == evt.Target.Selector {
+				// Just update the value of the previous event to the new (longer) string
+				// This merges "b", "be", "bes"... into just "best..."
+				prev.Value = evt.Value
+				continue
+			}
+		}
+
+		// 3. Detect "Enter" key masking as unknown input
+		if evt.Type == "input" && evt.Value == "en" && evt.Target.Tag == "unknown" {
+			evt.Type = "keypress"
+			evt.Value = "Enter"
+			// Inherit selector from previous event if target is lost
+			if len(compressed) > 0 {
+				evt.Target.Selector = compressed[len(compressed)-1].Target.Selector
+			}
+		}
+
+		compressed = append(compressed, evt)
 	}
+
+	b.events = compressed
 }
 
-// ==================== 6. Helpers ====================
+// ==================== 4. LLM Integration ====================
 
-func extractFieldName(attrs map[string]interface{}) string {
-	if v, ok := getStrAttr(attrs, "name"); ok {
-		return v
+func CallLLMGenerator(semanticContext []SemanticEvent) {
+	// Convert context to JSON string
+	ctxBytes, _ := json.MarshalIndent(semanticContext, "", "  ")
+	ctxString := string(ctxBytes)
+
+	// Construct the prompt
+	prompt := fmt.Sprintf(`
+You are an expert Golang automation engineer using Go Rod. 
+Generate a robust, production-ready script based on the user's semantic session history below.
+
+SEMANTIC CONTEXT:
+%s
+
+CRITICAL RULES FOR ROBUSTNESS:
+1. Handle Navigation: When you see 'action_type: navigate', use 'page = browser.MustPage("url")' or 'page.MustNavigate("url").MustWaitLoad()'.
+2. Wait for Visibility: Never click blindly. Always chain '.MustWaitVisible()' before interacting. 
+   - BAD: page.MustElement("#submit").MustClick()
+   - GOOD: page.MustElement("#submit").MustWaitVisible().MustClick()
+3. Wait for Stability: If an element might be animating (like a dropdown), use '.MustWaitStable()'.
+4. Smart Selectors: If the selector looks complex (e.g. div:nth-child...), prefer searching by text using 'page.MustElementR("tag", "text content")'.
+
+Output ONLY the Go code.
+`, ctxString)
+
+	// 👇 WRITE TO FILE
+	err := os.WriteFile("prompt.txt", []byte(prompt), 0644)
+	if err != nil {
+		fmt.Printf("❌ Error writing prompt to file: %v\n", err)
+	} else {
+		fmt.Println("💾 Prompt successfully saved to 'prompt.txt'")
 	}
-	if v, ok := getStrAttr(attrs, "id"); ok {
-		return v
-	}
-	if v, ok := getStrAttr(attrs, "placeholder"); ok {
-		return v
-	}
-	return "Field"
+
+	// Mock Console Output
+	fmt.Println("================ LLM PROMPT READY ================")
+	fmt.Println("(Check prompt.txt for the full content)")
 }
 
-func toCamelCase(s string) string {
-	s = strings.ReplaceAll(s, "-", " ")
-	s = strings.ReplaceAll(s, "_", " ")
-	words := strings.Fields(s)
-	for i := range words {
-		words[i] = strings.Title(words[i])
-	}
-	return strings.Join(words, "")
-}
-
-// ==================== 7. Main Entry Point ====================
+// ==================== 5. Main Execution ====================
 
 func main() {
-	// 1. Open the events.json file
-	filePath := "events.json"
-	file, err := os.Open(filePath)
+	// Ensure you have a valid events.json in the same folder
+	file, err := os.ReadFile("events.json")
 	if err != nil {
-		log.Fatalf("❌ Failed to open %s: %v", filePath, err)
-	}
-	defer file.Close()
-
-	// 2. Decode the JSON into our RRWebEvent slice
-	var events []RRWebEvent
-	decoder := json.NewDecoder(file)
-	if err := decoder.Decode(&events); err != nil {
-		log.Fatalf("❌ Failed to parse JSON events: %v", err)
+		log.Fatalf("Error reading events.json: %v", err)
 	}
 
-	log.Printf("📊 Successfully loaded %d events from %s", len(events), filePath)
-
-	// 3. Initialize the Builder and Process
-	builder := NewJobGraphBuilder()
-	builder.ProcessEvents(events)
-
-	// 4. Generate the Go Rod Automation Script
-	generatedCode := GenerateGoRodScript(builder.graph)
-
-	// 5. Save the output
-	outputFile := "generated_automation.go"
-	err = os.WriteFile(outputFile, []byte(generatedCode), 0644)
-	if err != nil {
-		log.Fatalf("❌ Failed to write generated script: %v", err)
+	var rawEvents []RRWebEvent
+	if err := json.Unmarshal(file, &rawEvents); err != nil {
+		log.Fatalf("Error parsing JSON: %v", err)
 	}
 
-	fmt.Printf("\n🚀 Success! Job Graph built with %d jobs.\n", len(builder.graph.Jobs))
-	fmt.Printf("📄 Script saved to: %s\n", outputFile)
+	builder := NewSemanticBuilder()
+	builder.Process(rawEvents)
+	builder.CompressEvents()
+
+	// Export the Semantic JSON for inspection
+	output, _ := json.MarshalIndent(builder.events, "", "  ")
+	_ = os.WriteFile("semantic_context.json", output, 0644)
+
+	fmt.Println("🚀 Semantic Context Generated!")
+	fmt.Printf("📦 Encapsulated %d user actions.\n", len(builder.events))
+
+	// Call the placeholder LLM
+	CallLLMGenerator(builder.events)
 }
