@@ -1,6 +1,6 @@
 module dev/bravebird/browser-automation-go
 
-go 1.25.2
+go 1.21
 
 require github.com/go-rod/rod v0.116.2
 

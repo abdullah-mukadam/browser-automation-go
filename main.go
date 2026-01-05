@@ -1,59 +1,30 @@
 package main
 
 import (
-	"crypto/md5"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
+	"os"
+	"sort"
 	"strings"
 )
 
-// Event types based on rrweb specification
+// ==================== 1. RRWeb & Data Structures ====================
+
 const (
-	EventDomContentLoaded    = 0
-	EventLoad                = 1
 	EventFullSnapshot        = 2
 	EventIncrementalSnapshot = 3
 	EventMeta                = 4
-	EventCustom              = 5
-	EventPlugin              = 6
 )
 
-// Incremental snapshot sources (complete list from rrweb)
 const (
-	SourceMutation          = 0
-	SourceMouseMove         = 1
-	SourceMouseInteraction  = 2
-	SourceScroll            = 3
-	SourceViewportResize    = 4
-	SourceInput             = 5
-	SourceTouchMove         = 6
-	SourceMediaInteraction  = 7
-	SourceStyleSheetRule    = 8
-	SourceCanvasMutation    = 9
-	SourceFont              = 10
-	SourceLog               = 11
-	SourceDrag              = 12
-	SourceStyleDeclaration  = 13
-	SourceSelection         = 14
-	SourceAdoptedStyleSheet = 15
-	SourceCustomElement     = 16
+	SourceMutation         = 0
+	SourceMouseInteraction = 2
+	SourceInput            = 5
 )
 
-// Mouse interaction types from rrweb
 const (
-	MouseUp           = 0
-	MouseDown         = 1
-	Click             = 2
-	ContextMenu       = 3
-	DblClick          = 4
-	Focus             = 5
-	Blur              = 6
-	TouchStart        = 7
-	TouchMoveDeparted = 8
-	TouchEnd          = 9
-	TouchCancel       = 10
+	Click = 2
 )
 
 type RRWebEvent struct {
@@ -62,54 +33,32 @@ type RRWebEvent struct {
 	Timestamp int64           `json:"timestamp"`
 }
 
-type FullSnapshotData struct {
-	Node          Node `json:"node"`
-	InitialOffset struct {
-		Left int `json:"left"`
-		Top  int `json:"top"`
-	} `json:"initialOffset"`
-}
-
 type Node struct {
+	ID          int                    `json:"id"`
 	Type        int                    `json:"type"`
 	TagName     string                 `json:"tagName"`
 	Attributes  map[string]interface{} `json:"attributes"`
 	ChildNodes  []Node                 `json:"childNodes"`
-	ID          int                    `json:"id"`
 	TextContent string                 `json:"textContent"`
-	Name        string                 `json:"name"`
-	PublicId    string                 `json:"publicId"`
-	SystemId    string                 `json:"systemId"`
-	IsStyle     bool                   `json:"isStyle"`
-	IsSVG       bool                   `json:"isSVG"`
+}
+
+type FullSnapshotData struct {
+	Node Node `json:"node"`
 }
 
 type IncrementalSnapshotData struct {
-	Source      int                 `json:"source"`
-	Type        int                 `json:"type"`
-	ID          int                 `json:"id"`
-	X           float64             `json:"x"`
-	Y           float64             `json:"y"`
-	Text        string              `json:"text"`
-	IsChecked   bool                `json:"isChecked"`
-	Positions   []MousePosition     `json:"positions"`
-	Adds        []AddedNode         `json:"adds"`
-	Removes     []RemovedNode       `json:"removes"`
-	Texts       []TextMutation      `json:"texts"`
-	Attributes  []AttributeMutation `json:"attributes"`
-	PointerType int                 `json:"pointerType"`
-}
-
-type MousePosition struct {
-	X          float64 `json:"x"`
-	Y          float64 `json:"y"`
-	ID         int     `json:"id"`
-	TimeOffset int64   `json:"timeOffset"`
+	Source     int                 `json:"source"`
+	Type       int                 `json:"type"` // Interaction Type (Click, etc.)
+	ID         int                 `json:"id"`
+	Text       string              `json:"text"`      // Input text
+	IsChecked  bool                `json:"isChecked"` // Checkbox state
+	Adds       []AddedNode         `json:"adds"`
+	Removes    []RemovedNode       `json:"removes"`
+	Attributes []AttributeMutation `json:"attributes"`
 }
 
 type AddedNode struct {
 	ParentID int  `json:"parentId"`
-	NextID   *int `json:"nextId"`
 	Node     Node `json:"node"`
 }
 
@@ -118,359 +67,372 @@ type RemovedNode struct {
 	ID       int `json:"id"`
 }
 
-type TextMutation struct {
-	ID    int    `json:"id"`
-	Value string `json:"value"`
-}
-
 type AttributeMutation struct {
 	ID         int                    `json:"id"`
 	Attributes map[string]interface{} `json:"attributes"`
 }
 
 type MetaData struct {
-	Href   string `json:"href"`
-	Width  int    `json:"width"`
-	Height int    `json:"height"`
+	Href string `json:"href"`
 }
 
-// Action represents a user action
-type Action struct {
-	Type      string
-	Selector  string
-	Value     string
-	Timestamp int64
-	X         float64
-	Y         float64
-	Hash      string // For deduplication
+// ==================== 2. Job Graph Structures ====================
+
+type JobType string
+
+const (
+	JobTypeNavigation  JobType = "navigation"
+	JobTypeInteraction JobType = "interaction" // Clicks
+	JobTypeInput       JobType = "input"       // Typing
+	JobTypeWait        JobType = "wait"        // Waiting for DOM
+)
+
+type Job struct {
+	ID           string
+	Type         JobType
+	Selector     string
+	Action       string
+	IsFixed      bool
+	FixedValue   string
+	VariableKey  string
+	Dependencies []string // IDs of jobs this depends on
+	Timestamp    int64
 }
 
-// NodeRegistry tracks rrweb node IDs to selectors
-type NodeRegistry struct {
-	nodes map[int]NodeInfo
+type JobGraph struct {
+	Jobs      map[string]*Job
+	Variables map[string]string // Key -> Description
+	Layers    [][]string        // Execution order
 }
 
+// ==================== 3. The "Perfect" Selector Engine ====================
+
+// NodeInfo stores the state of the DOM tree at any point in time
 type NodeInfo struct {
-	TagName     string
-	Attributes  map[string]interface{}
-	Parent      int
-	TextContent string
+	ID         int
+	TagName    string
+	Attributes map[string]interface{}
+	ParentID   int
+	Children   []int // Ordered list of child IDs for nth-of-type calculation
+}
+
+type NodeRegistry struct {
+	nodes map[int]*NodeInfo
 }
 
 func NewNodeRegistry() *NodeRegistry {
 	return &NodeRegistry{
-		nodes: make(map[int]NodeInfo),
+		nodes: make(map[int]*NodeInfo),
 	}
 }
 
+// Register recursively adds nodes to the registry
 func (nr *NodeRegistry) Register(node Node, parentID int) {
-	nr.nodes[node.ID] = NodeInfo{
-		TagName:     node.TagName,
-		Attributes:  node.Attributes,
-		Parent:      parentID,
-		TextContent: node.TextContent,
+	info := &NodeInfo{
+		ID:         node.ID,
+		TagName:    strings.ToLower(node.TagName),
+		Attributes: node.Attributes,
+		ParentID:   parentID,
+		Children:   make([]int, 0),
 	}
+	nr.nodes[node.ID] = info
+
+	// Update parent's children list
+	if parent, ok := nr.nodes[parentID]; ok {
+		parent.Children = append(parent.Children, node.ID)
+	}
+
 	for _, child := range node.ChildNodes {
 		nr.Register(child, node.ID)
 	}
 }
 
-func (nr *NodeRegistry) GetSelector(id int) string {
-	info, ok := nr.nodes[id]
+func (nr *NodeRegistry) Remove(id int) {
+	node, ok := nr.nodes[id]
 	if !ok {
-		return fmt.Sprintf("[data-rrweb-id='%d']", id)
+		return
 	}
-
-	getAttrString := func(key string) (string, bool) {
-		val, ok := info.Attributes[key]
-		if !ok {
-			return "", false
-		}
-		switch v := val.(type) {
-		case string:
-			return v, v != ""
-		case bool:
-			return "", false
-		default:
-			return fmt.Sprintf("%v", v), true
-		}
-	}
-
-	// Priority: id > name > data-testid > role > type > class > tag
-	if idAttr, ok := getAttrString("id"); ok {
-		return fmt.Sprintf("#%s", idAttr)
-	}
-
-	if name, ok := getAttrString("name"); ok {
-		return fmt.Sprintf("%s[name='%s']", info.TagName, name)
-	}
-
-	if dataTestId, ok := getAttrString("data-testid"); ok {
-		return fmt.Sprintf("[data-testid='%s']", dataTestId)
-	}
-
-	if role, ok := getAttrString("role"); ok {
-		return fmt.Sprintf("%s[role='%s']", info.TagName, role)
-	}
-
-	if typ, ok := getAttrString("type"); ok {
-		return fmt.Sprintf("%s[type='%s']", info.TagName, typ)
-	}
-
-	if class, ok := getAttrString("class"); ok {
-		classes := strings.Fields(class)
-		if len(classes) > 0 {
-			// Use first meaningful class (not utility classes)
-			for _, cls := range classes {
-				if !isUtilityClass(cls) {
-					return fmt.Sprintf("%s.%s", info.TagName, cls)
-				}
+	// Remove from parent's children list
+	if parent, ok := nr.nodes[node.ParentID]; ok {
+		newChildren := make([]int, 0)
+		for _, childID := range parent.Children {
+			if childID != id {
+				newChildren = append(newChildren, childID)
 			}
-			return fmt.Sprintf("%s.%s", info.TagName, classes[0])
 		}
+		parent.Children = newChildren
 	}
-
-	if ariaLabel, ok := getAttrString("aria-label"); ok {
-		return fmt.Sprintf("%s[aria-label='%s']", info.TagName, ariaLabel)
-	}
-
-	return info.TagName
+	delete(nr.nodes, id)
 }
 
-func isUtilityClass(class string) bool {
-	// Common utility class prefixes
-	prefixes := []string{"m-", "p-", "mt-", "mb-", "ml-", "mr-", "pt-", "pb-", "pl-", "pr-",
-		"w-", "h-", "flex-", "grid-", "text-", "bg-", "border-"}
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(class, prefix) {
+//func isGeneratedClass(className string) bool {
+//	// Logic: If the class is exactly 5-8 chars and alphanumeric, it's likely dynamic
+//	// e.g., "k1zIA" matches this.
+//	parts := strings.Fields(className)
+//	for _, p := range parts {
+//		if len(p) < 10 && containsNumbersAndLetters(p) {
+//			return true
+//		}
+//	}
+//	return false
+//}
+
+// GetRobustSelector generates the most specific yet stable selector possible
+func (nr *NodeRegistry) GetRobustSelector(id int) string {
+	node, ok := nr.nodes[id]
+	if !ok {
+		return "body" // Fallback
+	}
+
+	// Strategy 1: Unique ID (Gold Standard)
+	if val, ok := getStrAttr(node.Attributes, "id"); ok {
+		// Ensure ID is valid CSS (doesn't start with numbers, etc - simplified check)
+		if !strings.ContainsAny(val, " .:") {
+			return fmt.Sprintf("#%s", val)
+		}
+	}
+
+	// Strategy 2: Unique Name (Silver Standard for inputs)
+	if val, ok := getStrAttr(node.Attributes, "name"); ok {
+		return fmt.Sprintf("%s[name=%q]", node.TagName, val)
+	}
+
+	// Strategy 3: High-Value Attributes (Test IDs, Aria)
+	targetAttrs := []string{"data-testid", "data-test-id", "aria-label", "placeholder", "role"}
+	for _, attr := range targetAttrs {
+		if val, ok := getStrAttr(node.Attributes, attr); ok {
+			return fmt.Sprintf("%s[%s=%q]", node.TagName, attr, val)
+		}
+	}
+
+	// Strategy 4: Specific Classes (Bronze Standard)
+	// We avoid generic layout classes like "flex", "mt-4"
+	if val, ok := getStrAttr(node.Attributes, "class"); ok {
+		classes := strings.Fields(val)
+		validClasses := make([]string, 0)
+		for _, c := range classes {
+			if !isUtilityClass(c) {
+				validClasses = append(validClasses, "."+c)
+			}
+		}
+		// If we found specific classes, try to use them
+		if len(validClasses) > 0 && len(validClasses) <= 2 { // Don't chain too many
+			return fmt.Sprintf("%s%s", node.TagName, strings.Join(validClasses, ""))
+		}
+	}
+
+	return nr.GetStructuralPath(node.ParentID)
+
+	//// Strategy 5: Structural Fallback (The "Nth-Child" Hammer)
+	//// If all else fails, describe the path relative to the parent
+	//if node.ParentID != 0 {
+	//	parentSelector := nr.GetRobustSelector(node.ParentID)
+	//
+	//	// Calculate nth-of-type
+	//	index := 1
+	//	siblings := nr.nodes[node.ParentID].Children
+	//	for _, siblingID := range siblings {
+	//		if siblingID == id {
+	//			break
+	//		}
+	//		sibling, exists := nr.nodes[siblingID]
+	//		if exists && sibling.TagName == node.TagName {
+	//			index++
+	//		}
+	//	}
+	//
+	//	return fmt.Sprintf("%s > %s:nth-of-type(%d)", parentSelector, node.TagName, index)
+	//}
+
+	return node.TagName
+}
+
+// GetStructuralPath builds a selector from the element up to the body.
+// Example: html > body > div:nth-child(2) > div:nth-child(1) > button
+func (nr *NodeRegistry) GetStructuralPath(id int) string {
+	node, ok := nr.nodes[id]
+	if !ok || node.TagName == "" || node.TagName == "html" {
+		return "html"
+	}
+
+	if node.TagName == "body" {
+		return "body"
+	}
+
+	// 1. Get Parent
+	parent, exists := nr.nodes[node.ParentID]
+	if !exists {
+		return node.TagName
+	}
+
+	// 2. Calculate nth-child index
+	// We count all siblings (regardless of tag name) to get the exact index
+	index := 1
+	for _, siblingID := range parent.Children {
+		if siblingID == id {
+			break
+		}
+		index++
+	}
+
+	// 3. Recurse up the tree
+	parentPath := nr.GetStructuralPath(node.ParentID)
+
+	// 4. Return the combined path
+	// Only add :nth-child if there's a reason to (helps readability)
+	return fmt.Sprintf("%s > %s:nth-child(%d)", parentPath, node.TagName, index)
+}
+
+func isUtilityClass(c string) bool {
+	// Simple heuristic to ignore Tailwind/Bootstrap utility classes
+	prefixes := []string{"m-", "p-", "text-", "bg-", "flex", "grid", "w-", "h-", "d-", "col-"}
+	for _, p := range prefixes {
+		if strings.HasPrefix(c, p) {
 			return true
 		}
 	}
 	return false
 }
 
-// Converter converts rrweb events to Go Rod actions
-type Converter struct {
-	registry        *NodeRegistry
-	baseURL         string
-	actions         []Action
-	lastTimestamp   int64
-	lastClickTarget string
-	lastInputTarget string
-	clickCount      map[string]int
+func getStrAttr(attrs map[string]interface{}, key string) (string, bool) {
+	if val, ok := attrs[key]; ok {
+		if str, ok := val.(string); ok && str != "" {
+			return str, true
+		}
+	}
+	return "", false
 }
 
-func NewConverter() *Converter {
-	return &Converter{
-		registry:   NewNodeRegistry(),
-		actions:    []Action{},
-		clickCount: make(map[string]int),
+// ==================== 4. The Graph Builder Logic ====================
+
+type JobGraphBuilder struct {
+	registry   *NodeRegistry
+	graph      *JobGraph
+	jobCounter int
+	baseURL    string
+}
+
+func NewJobGraphBuilder() *JobGraphBuilder {
+	return &JobGraphBuilder{
+		registry: NewNodeRegistry(),
+		graph: &JobGraph{
+			Jobs:      make(map[string]*Job),
+			Variables: make(map[string]string),
+		},
 	}
 }
 
-func (c *Converter) ProcessEvents(events []RRWebEvent) error {
+func (b *JobGraphBuilder) ProcessEvents(events []RRWebEvent) {
+	log.Println("⚙️ Processing events to build Semantic Job Graph...")
+
 	for _, event := range events {
 		switch event.Type {
-		case EventFullSnapshot:
-			var data FullSnapshotData
-			if err := json.Unmarshal(event.Data, &data); err != nil {
-				return fmt.Errorf("failed to unmarshal full snapshot: %w", err)
-			}
-			c.registry.Register(data.Node, 0)
-
 		case EventMeta:
 			var data MetaData
-			if err := json.Unmarshal(event.Data, &data); err != nil {
-				return fmt.Errorf("failed to unmarshal meta: %w", err)
-			}
-			c.baseURL = data.Href
-			c.addAction(Action{
-				Type:      "navigate",
-				Value:     data.Href,
-				Timestamp: event.Timestamp,
+			json.Unmarshal(event.Data, &data)
+			b.baseURL = data.Href
+			b.addJob(&Job{
+				Type:       JobTypeNavigation,
+				Action:     "navigate",
+				IsFixed:    true,
+				FixedValue: data.Href,
+				Timestamp:  event.Timestamp,
 			})
+
+		case EventFullSnapshot:
+			var data FullSnapshotData
+			json.Unmarshal(event.Data, &data)
+			b.registry.Register(data.Node, 0)
 
 		case EventIncrementalSnapshot:
 			var data IncrementalSnapshotData
-			if err := json.Unmarshal(event.Data, &data); err != nil {
-				return fmt.Errorf("failed to unmarshal incremental snapshot: %w", err)
+			json.Unmarshal(event.Data, &data)
+
+			// 1. Handle DOM Mutations (Maintain Registry State)
+			if data.Source == SourceMutation {
+				for _, add := range data.Adds {
+					b.registry.Register(add.Node, add.ParentID)
+				}
+				for _, rem := range data.Removes {
+					b.registry.Remove(rem.ID)
+				}
+				// Note: In a deeper implementation, we would create "Wait" jobs
+				// here if a mutation inserts a critical element we interact with later.
 			}
-			c.processIncrementalSnapshot(data, event.Timestamp)
-		}
-	}
-	return nil
-}
 
-func (c *Converter) processIncrementalSnapshot(data IncrementalSnapshotData, timestamp int64) {
-	switch data.Source {
-	case SourceMouseInteraction:
-		c.processMouseInteraction(data, timestamp)
-	case SourceInput:
-		c.processInput(data, timestamp)
-	case SourceScroll:
-		c.processScroll(data, timestamp)
-	case SourceMutation:
-		c.processMutation(data)
-	case SourceViewportResize:
-		// Viewport resize is usually not needed for replay
-	case SourceMouseMove, SourceTouchMove, SourceDrag:
-		// Mouse movements are too noisy for automation scripts
-	}
-}
+			// 2. Handle Interactions (Clicks)
+			if data.Source == SourceMouseInteraction && data.Type == Click {
+				selector := b.registry.GetRobustSelector(data.ID)
+				b.addJob(&Job{
+					Type:      JobTypeInteraction,
+					Selector:  selector,
+					Action:    "click",
+					IsFixed:   true,
+					Timestamp: event.Timestamp,
+				})
+			}
 
-func (c *Converter) processMouseInteraction(data IncrementalSnapshotData, timestamp int64) {
-	selector := c.registry.GetSelector(data.ID)
+			// 3. Handle Inputs (Typing)
+			if data.Source == SourceInput {
+				node, ok := b.registry.nodes[data.ID]
+				if !ok {
+					continue
+				}
 
-	switch data.Type {
-	case Click:
-		// Track repeated clicks on same element
-		c.clickCount[selector]++
+				inputType, _ := getStrAttr(node.Attributes, "type")
+				isStatic := data.IsChecked || inputType == "checkbox" || inputType == "radio"
 
-		// Avoid duplicate clicks within 500ms
-		if c.lastClickTarget == selector && timestamp-c.lastTimestamp < 500 {
-			return
-		}
+				job := &Job{
+					Type:      JobTypeInput,
+					Selector:  b.registry.GetRobustSelector(data.ID),
+					Action:    "input",
+					IsFixed:   isStatic,
+					Timestamp: event.Timestamp,
+				}
 
-		c.lastClickTarget = selector
-		c.addAction(Action{
-			Type:      "click",
-			Selector:  selector,
-			Timestamp: timestamp,
-			X:         data.X,
-			Y:         data.Y,
-		})
-
-	case DblClick:
-		// Replace last click with dblclick if it was on same element
-		if len(c.actions) > 0 {
-			lastAction := c.actions[len(c.actions)-1]
-			if lastAction.Type == "click" && lastAction.Selector == selector {
-				c.actions[len(c.actions)-1].Type = "dblclick"
-				return
+				if isStatic {
+					job.FixedValue = "true" // Simplified for checkbox
+				} else {
+					// Semantic Variable Extraction
+					fieldName := extractFieldName(node.Attributes)
+					varKey := toCamelCase("Input " + fieldName)
+					job.VariableKey = varKey
+					b.graph.Variables[varKey] = fmt.Sprintf("Value for %s field", fieldName)
+				}
+				b.addJob(job)
 			}
 		}
-		c.addAction(Action{
-			Type:      "dblclick",
-			Selector:  selector,
-			Timestamp: timestamp,
-		})
-
-	case Focus:
-		// Only record focus if not followed by immediate input
-		c.addAction(Action{
-			Type:      "focus",
-			Selector:  selector,
-			Timestamp: timestamp,
-		})
-
-	case ContextMenu:
-		c.addAction(Action{
-			Type:      "contextmenu",
-			Selector:  selector,
-			Timestamp: timestamp,
-		})
 	}
-
-	c.lastTimestamp = timestamp
+	b.structureGraph()
 }
 
-func (c *Converter) processInput(data IncrementalSnapshotData, timestamp int64) {
-	selector := c.registry.GetSelector(data.ID)
+func (b *JobGraphBuilder) addJob(job *Job) {
+	b.jobCounter++
+	job.ID = fmt.Sprintf("job_%03d", b.jobCounter)
+	b.graph.Jobs[job.ID] = job
+}
 
-	// Remove unnecessary focus before input
-	if len(c.actions) > 0 {
-		lastAction := &c.actions[len(c.actions)-1]
-		if lastAction.Type == "focus" && lastAction.Selector == selector {
-			c.actions = c.actions[:len(c.actions)-1]
-		}
+// structureGraph builds dependencies and layers (Simple sequential logic for now)
+func (b *JobGraphBuilder) structureGraph() {
+	// Sort jobs by timestamp
+	var sortedJobs []*Job
+	for _, job := range b.graph.Jobs {
+		sortedJobs = append(sortedJobs, job)
 	}
-
-	actionType := "input"
-	if data.IsChecked {
-		actionType = "check"
-	}
-
-	// Merge consecutive inputs on same element
-	if c.lastInputTarget == selector && len(c.actions) > 0 {
-		lastAction := &c.actions[len(c.actions)-1]
-		if lastAction.Type == "input" && timestamp-lastAction.Timestamp < 1000 {
-			lastAction.Value = data.Text
-			lastAction.Timestamp = timestamp
-			return
-		}
-	}
-
-	c.lastInputTarget = selector
-	c.addAction(Action{
-		Type:      actionType,
-		Selector:  selector,
-		Value:     data.Text,
-		Timestamp: timestamp,
+	sort.Slice(sortedJobs, func(i, j int) bool {
+		return sortedJobs[i].Timestamp < sortedJobs[j].Timestamp
 	})
-}
 
-func (c *Converter) processScroll(data IncrementalSnapshotData, timestamp int64) {
-	// Only record significant scrolls (>100px change)
-	if len(c.actions) > 0 {
-		lastAction := &c.actions[len(c.actions)-1]
-		if lastAction.Type == "scroll" {
-			deltaY := data.Y - lastAction.Y
-			if deltaY < 100 && deltaY > -100 {
-				lastAction.Y = data.Y
-				lastAction.X = data.X
-				lastAction.Timestamp = timestamp
-				return
-			}
-		}
-	}
-
-	c.addAction(Action{
-		Type:      "scroll",
-		X:         data.X,
-		Y:         data.Y,
-		Timestamp: timestamp,
-	})
-}
-
-func (c *Converter) processMutation(data IncrementalSnapshotData) {
-	// Register new nodes for selector resolution
-	for _, add := range data.Adds {
-		c.registry.Register(add.Node, add.ParentID)
-	}
-
-	// Update text mutations
-	for _, text := range data.Texts {
-		if info, ok := c.registry.nodes[text.ID]; ok {
-			info.TextContent = text.Value
-			c.registry.nodes[text.ID] = info
-		}
-	}
-
-	// Update attribute mutations
-	for _, attr := range data.Attributes {
-		if info, ok := c.registry.nodes[attr.ID]; ok {
-			for k, v := range attr.Attributes {
-				info.Attributes[k] = v
-			}
-			c.registry.nodes[attr.ID] = info
-		}
+	// Create simplified layers
+	b.graph.Layers = make([][]string, 0)
+	for _, job := range sortedJobs {
+		b.graph.Layers = append(b.graph.Layers, []string{job.ID})
 	}
 }
 
-func (c *Converter) addAction(action Action) {
-	// Generate hash for deduplication
-	action.Hash = c.hashAction(action)
-	c.actions = append(c.actions, action)
-}
+// ==================== 5. Code Generator ====================
 
-func (c *Converter) hashAction(action Action) string {
-	data := fmt.Sprintf("%s:%s:%s", action.Type, action.Selector, action.Value)
-	hash := md5.Sum([]byte(data))
-	return fmt.Sprintf("%x", hash)
-}
-
-// GenerateGoRodScript generates the final Go Rod script with deduplication
-func (c *Converter) GenerateGoRodScript() string {
+func GenerateGoRodScript(graph *JobGraph) string {
 	var sb strings.Builder
 
 	sb.WriteString(`package main
@@ -478,193 +440,128 @@ func (c *Converter) GenerateGoRodScript() string {
 import (
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
-	"log"
 	"time"
+	"fmt"
 )
 
-func main() {
-	// Launch browser
-	u := launcher.New().Headless(false).MustLaunch()
-	browser := rod.New().ControlURL(u).MustConnect()
-	defer browser.MustClose()
-
-	page := browser.MustPage()
-	
 `)
 
-	// Deduplicate and optimize actions
-	optimizedActions := c.deduplicateActions(c.actions)
-
-	lastTime := int64(0)
-	for i, action := range optimizedActions {
-		// Add realistic delays between actions
-		if lastTime > 0 && action.Timestamp > lastTime {
-			delay := action.Timestamp - lastTime
-			if delay > 100 && delay < 10000 { // Between 100ms and 10s
-				sb.WriteString(fmt.Sprintf("\ttime.Sleep(%d * time.Millisecond)\n", delay))
-			} else if delay >= 10000 {
-				// Cap very long delays
-				sb.WriteString("\ttime.Sleep(2 * time.Second)\n")
-			}
+	// Generate Struct for Variables
+	if len(graph.Variables) > 0 {
+		sb.WriteString("type AutomationInputs struct {\n")
+		for key, desc := range graph.Variables {
+			sb.WriteString(fmt.Sprintf("\t%s string // %s\n", key, desc))
 		}
-		lastTime = action.Timestamp
-
-		switch action.Type {
-		case "navigate":
-			sb.WriteString(fmt.Sprintf("\t// Step %d: Navigate to page\n", i+1))
-			sb.WriteString(fmt.Sprintf("\tpage.MustNavigate(\"%s\").MustWaitLoad()\n", escapeString(action.Value)))
-
-		case "click":
-			sb.WriteString(fmt.Sprintf("\t// Step %d: Click element\n", i+1))
-			sb.WriteString(fmt.Sprintf("\tpage.MustElement(\"%s\").MustWaitVisible().MustClick()\n",
-				escapeSelector(action.Selector)))
-
-		case "dblclick":
-			sb.WriteString(fmt.Sprintf("\t// Step %d: Double-click element\n", i+1))
-			sb.WriteString(fmt.Sprintf("\tel := page.MustElement(\"%s\").MustWaitVisible()\n",
-				escapeSelector(action.Selector)))
-			sb.WriteString("\tel.MustClick().MustClick()\n")
-
-		case "input":
-			sb.WriteString(fmt.Sprintf("\t// Step %d: Input text\n", i+1))
-			sb.WriteString(fmt.Sprintf("\tpage.MustElement(\"%s\").MustWaitVisible().MustInput(\"%s\")\n",
-				escapeSelector(action.Selector), escapeString(action.Value)))
-
-		case "check":
-			sb.WriteString(fmt.Sprintf("\t// Step %d: Toggle checkbox\n", i+1))
-			sb.WriteString(fmt.Sprintf("\tpage.MustElement(\"%s\").MustWaitVisible().MustClick()\n",
-				escapeSelector(action.Selector)))
-
-		case "scroll":
-			sb.WriteString(fmt.Sprintf("\t// Step %d: Scroll page\n", i+1))
-			sb.WriteString(fmt.Sprintf("\tpage.MustEval(`window.scrollTo(%f, %f)`)\n",
-				action.X, action.Y))
-
-		case "focus":
-			sb.WriteString(fmt.Sprintf("\t// Step %d: Focus element\n", i+1))
-			sb.WriteString(fmt.Sprintf("\tpage.MustElement(\"%s\").MustWaitVisible().MustFocus()\n",
-				escapeSelector(action.Selector)))
-
-		case "contextmenu":
-			sb.WriteString(fmt.Sprintf("\t// Step %d: Right-click element\n", i+1))
-			sb.WriteString(fmt.Sprintf("\tpage.MustElement(\"%s\").MustWaitVisible().MustClick(proto.InputMouseButtonRight)\n",
-				escapeSelector(action.Selector)))
-		}
-
-		sb.WriteString("\n")
+		sb.WriteString("}\n\n")
 	}
 
-	sb.WriteString(`	// Wait for final state
-	time.Sleep(2 * time.Second)
-	
-	log.Println("✓ Test completed successfully")
-	log.Println("Press Ctrl+C to exit...")
-	time.Sleep(1 * time.Hour)
-}
-`)
+	sb.WriteString("func main() {\n")
+	sb.WriteString("\t// 1. Setup Browser\n")
+	sb.WriteString("\turl := launcher.New().Headless(false).MustLaunch()\n")
+	sb.WriteString("\tbrowser := rod.New().ControlURL(url).MustConnect()\n")
+	sb.WriteString("\tdefer browser.MustClose()\n")
+	sb.WriteString("\tpage := browser.MustPage()\n\n")
+
+	// Inject Variables
+	if len(graph.Variables) > 0 {
+		sb.WriteString("\t// 2. Define Inputs (Replace these with real data)\n")
+		sb.WriteString("\tinputs := AutomationInputs{\n")
+		for key := range graph.Variables {
+			sb.WriteString(fmt.Sprintf("\t\t%s: \"SAMPLE_VALUE\",\n", key))
+		}
+		sb.WriteString("\t}\n\n")
+	}
+
+	sb.WriteString("\t// 3. Execute Graph\n")
+	for i, layer := range graph.Layers {
+		sb.WriteString(fmt.Sprintf("\t// --- Step %d ---\n", i+1))
+		for _, jobID := range layer {
+			job := graph.Jobs[jobID]
+			writeJobLogic(&sb, job)
+		}
+	}
+
+	sb.WriteString("\n\tfmt.Println(\"✅ Automation Complete\")\n")
+	sb.WriteString("\ttime.Sleep(2 * time.Second)\n")
+	sb.WriteString("}\n")
 
 	return sb.String()
 }
 
-// deduplicateActions removes redundant consecutive actions
-func (c *Converter) deduplicateActions(actions []Action) []Action {
-	if len(actions) == 0 {
-		return actions
+func writeJobLogic(sb *strings.Builder, job *Job) {
+	switch job.Type {
+	case JobTypeNavigation:
+		sb.WriteString(fmt.Sprintf("\tpage.MustNavigate(%q).MustWaitLoad()\n", job.FixedValue))
+	case JobTypeInteraction:
+		sb.WriteString(fmt.Sprintf("\tpage.MustElement(%q).MustWaitVisible().MustClick()\n", job.Selector))
+	case JobTypeInput:
+		if job.IsFixed {
+			sb.WriteString(fmt.Sprintf("\tpage.MustElement(%q).MustWaitVisible().MustClick() // Toggle/Check\n", job.Selector))
+		} else {
+			sb.WriteString(fmt.Sprintf("\tpage.MustElement(%q).MustWaitVisible().MustInput(inputs.%s)\n", job.Selector, job.VariableKey))
+		}
 	}
+}
 
-	var result []Action
-	result = append(result, actions[0])
+// ==================== 6. Helpers ====================
 
-	for i := 1; i < len(actions); i++ {
-		curr := actions[i]
-		prev := result[len(result)-1]
-
-		// Skip if same action on same element within 500ms
-		if curr.Type == prev.Type &&
-			curr.Selector == prev.Selector &&
-			curr.Type == "click" &&
-			curr.Timestamp-prev.Timestamp < 500 {
-			continue
-		}
-
-		// Skip redundant scrolls
-		if curr.Type == "scroll" && prev.Type == "scroll" {
-			result[len(result)-1] = curr
-			continue
-		}
-
-		// Skip focus immediately followed by input/click
-		if prev.Type == "focus" {
-			if curr.Selector == prev.Selector &&
-				(curr.Type == "input" || curr.Type == "click") {
-				result = result[:len(result)-1]
-			}
-		}
-
-		result = append(result, curr)
+func extractFieldName(attrs map[string]interface{}) string {
+	if v, ok := getStrAttr(attrs, "name"); ok {
+		return v
 	}
-
-	return result
+	if v, ok := getStrAttr(attrs, "id"); ok {
+		return v
+	}
+	if v, ok := getStrAttr(attrs, "placeholder"); ok {
+		return v
+	}
+	return "Field"
 }
 
-func escapeSelector(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	return s
+func toCamelCase(s string) string {
+	s = strings.ReplaceAll(s, "-", " ")
+	s = strings.ReplaceAll(s, "_", " ")
+	words := strings.Fields(s)
+	for i := range words {
+		words[i] = strings.Title(words[i])
+	}
+	return strings.Join(words, "")
 }
 
-func escapeString(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	s = strings.ReplaceAll(s, "\n", `\n`)
-	s = strings.ReplaceAll(s, "\t", `\t`)
-	s = strings.ReplaceAll(s, "\r", `\r`)
-	return s
-}
+// ==================== 7. Main Entry Point ====================
 
 func main() {
-	// Read rrweb events from file
-	data, err := ioutil.ReadFile("events.json")
+	// 1. Open the events.json file
+	filePath := "events.json"
+	file, err := os.Open(filePath)
 	if err != nil {
-		log.Fatalf("❌ Failed to read events.json: %v", err)
+		log.Fatalf("❌ Failed to open %s: %v", filePath, err)
 	}
+	defer file.Close()
 
-	// Parse events - handle both single event and array
+	// 2. Decode the JSON into our RRWebEvent slice
 	var events []RRWebEvent
-
-	// Try parsing as array first
-	if err := json.Unmarshal(data, &events); err != nil {
-		// Try parsing as single event
-		var singleEvent RRWebEvent
-		if err := json.Unmarshal(data, &singleEvent); err != nil {
-			log.Fatalf("❌ Failed to parse events: %v", err)
-		}
-		events = []RRWebEvent{singleEvent}
+	decoder := json.NewDecoder(file)
+	if err := decoder.Decode(&events); err != nil {
+		log.Fatalf("❌ Failed to parse JSON events: %v", err)
 	}
 
-	log.Printf("📊 Loaded %d rrweb events\n", len(events))
+	log.Printf("📊 Successfully loaded %d events from %s", len(events), filePath)
 
-	// Convert events to actions
-	converter := NewConverter()
-	if err := converter.ProcessEvents(events); err != nil {
-		log.Fatalf("❌ Failed to process events: %v", err)
+	// 3. Initialize the Builder and Process
+	builder := NewJobGraphBuilder()
+	builder.ProcessEvents(events)
+
+	// 4. Generate the Go Rod Automation Script
+	generatedCode := GenerateGoRodScript(builder.graph)
+
+	// 5. Save the output
+	outputFile := "generated_automation.go"
+	err = os.WriteFile(outputFile, []byte(generatedCode), 0644)
+	if err != nil {
+		log.Fatalf("❌ Failed to write generated script: %v", err)
 	}
 
-	log.Printf("🔄 Extracted %d raw actions\n", len(converter.actions))
-
-	// Generate Go Rod script
-	script := converter.GenerateGoRodScript()
-
-	// Write to file
-	if err := ioutil.WriteFile("generated_test.go", []byte(script), 0644); err != nil {
-		log.Fatalf("❌ Failed to write script: %v", err)
-	}
-
-	// Count optimized actions
-	optimized := converter.deduplicateActions(converter.actions)
-
-	fmt.Println("✅ Generated Go Rod script: generated_test.go")
-	fmt.Printf("📝 Actions: %d raw → %d optimized\n", len(converter.actions), len(optimized))
-	fmt.Printf("🎯 Base URL: %s\n", converter.baseURL)
-	fmt.Println("\n💡 Run with: go run generated_test.go")
+	fmt.Printf("\n🚀 Success! Job Graph built with %d jobs.\n", len(builder.graph.Jobs))
+	fmt.Printf("📄 Script saved to: %s\n", outputFile)
 }
