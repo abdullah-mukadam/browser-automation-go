@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package bravebird;
+
+option go_package = "dev/bravebird/browser-automation-go/pkg/proto";
+
+// The top-level message containing the entire session flow
+message HybridSession {
+    // List of all recorded events (semantic + DOM snapshots)
+    repeated HybridEvent events = 1;
+}
+
+message HybridEvent {
+    // Source of the event: "custom" (semantic) or "rrweb" (DOM)
+    string source = 1;
+
+    // Timestamp in epoch milliseconds (double to capture high precision if needed)
+    double timestamp = 2;
+
+    // Event type: e.g., "click", "input", "tab_switch" OR rrweb event type (as string/int)
+    string type = 3;
+
+    // For custom events: specific action details (optional)
+    string action = 4;
+
+    // For input events: the value entered
+    string value = 5;
+
+    // Target element details for semantic events
+    CustomTarget target = 6;
+
+    // For copy/paste/cut events: the text content involved
+    string text = 7;
+
+    // JSON-serialized string containing complex data
+    // Used for:
+    // - rrweb event payloads (full DOM snapshots, mutations)
+    // - tab_switch details (url, title, id)
+    string data = 8;
+}
+
+message CustomTarget {
+    // CSS selector path to the element
+    string selector = 1;
+
+    // HTML tag name (e.g., "BUTTON", "INPUT")
+    string tag = 2;
+
+    // Rough text content of the element (for context/verification)
+    string text = 3;
+}

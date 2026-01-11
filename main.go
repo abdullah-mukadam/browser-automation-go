@@ -11,26 +11,14 @@ import (
 
 // ==================== 1. Core Structures ====================
 
-// VariableToken: Optimized for minimal token usage in JSON
-// t = token text, b = bucket (if variable), c = confidence
-type VariableToken struct {
-	Text       string  `json:"t"`
-	Bucket     string  `json:"b,omitempty"` // Empty if fixed text
-	Confidence float64 `json:"c,omitempty"` // 0.0-1.0
-}
-
-type InputAnalysis struct {
-	Tokens []VariableToken `json:"tokens"`
-}
-
+// SemanticEvent: The clean, compressed representation of an action
 type SemanticEvent struct {
-	Seq      int            `json:"seq"`
-	Type     string         `json:"type"`
-	Target   SemanticNode   `json:"target"`
-	Rank     string         `json:"rank"` // High/Medium/Low
-	Value    string         `json:"val,omitempty"`
-	Analysis *InputAnalysis `json:"nlp,omitempty"` // <--- The compacted analysis layer
-	Context  []SemanticNode `json:"ctx,omitempty"`
+	Seq     int            `json:"seq"`
+	Type    string         `json:"type"`
+	Target  SemanticNode   `json:"target"`
+	Rank    string         `json:"rank"` // High/Medium/Low
+	Value   string         `json:"val,omitempty"`
+	Context []SemanticNode `json:"ctx,omitempty"`
 }
 
 type SemanticNode struct {
@@ -150,11 +138,11 @@ func (nr *NodeRegistry) GetRobustSelector(id int) string {
 	if !ok {
 		return ""
 	}
-	// 1. ID
+	// 1. ID (filter out dynamic looking IDs)
 	if idVal, ok := node.Attributes["id"].(string); ok && !containsNumbersAndLetters(idVal) {
 		return fmt.Sprintf("#%s", idVal)
 	}
-	// 2. Class
+	// 2. Class (filter out dynamic looking classes)
 	if classVal, ok := node.Attributes["class"].(string); ok {
 		classes := strings.Split(classVal, " ")
 		for _, c := range classes {
@@ -180,40 +168,7 @@ func containsNumbersAndLetters(s string) bool {
 	return hasL && hasN
 }
 
-// ==================== 3. Semantic Logic & Analysis ====================
-
-var stopWords = map[string]bool{
-	"the": true, "of": true, "in": true, "at": true, "to": true,
-	"for": true, "with": true, "best": true, "near": true, "me": true,
-}
-
-// AnalyzeInputSemantics performs token classification with Mock NLP
-func AnalyzeInputSemantics(inputText string) InputAnalysis {
-	words := strings.Fields(inputText)
-	var tokens []VariableToken
-
-	for _, word := range words {
-		cleanWord := strings.ToLower(strings.Trim(word, ".,?!"))
-		token := VariableToken{Text: word} // Default: just text
-
-		// --- MOCK NLP LOGIC ---
-		if !stopWords[cleanWord] {
-			if cleanWord == "sushi" || cleanWord == "burger" || cleanWord == "pizza" {
-				token.Bucket = "cuisineType"
-				token.Confidence = 0.9
-			} else if cleanWord == "nyc" || cleanWord == "london" || cleanWord == "paris" {
-				token.Bucket = "targetCity"
-				token.Confidence = 0.95
-			} else if cleanWord != "restaurants" && cleanWord != "places" {
-				// Unknown nouns
-				token.Bucket = "searchQuery"
-				token.Confidence = 0.5
-			}
-		}
-		tokens = append(tokens, token)
-	}
-	return InputAnalysis{Tokens: tokens}
-}
+// ==================== 3. Semantic Builder ====================
 
 type SemanticBuilder struct {
 	registry       *NodeRegistry
@@ -309,7 +264,7 @@ func (b *SemanticBuilder) PostProcess() {
 			}
 		}
 		evt.Target.Attributes = cleanedAttrs
-		evt.Context = nil // Aggressively clear context for token savings
+		evt.Context = nil // Aggressive Context Cleaning
 
 		// 2. Debounce Inputs
 		if i > 0 {
@@ -329,12 +284,6 @@ func (b *SemanticBuilder) PostProcess() {
 			}
 		}
 
-		// 4. Run Variable Extraction (Only on final debounced inputs)
-		if evt.Type == "input" && len(evt.Value) > 3 {
-			analysis := AnalyzeInputSemantics(evt.Value)
-			evt.Analysis = &analysis
-		}
-
 		compressed = append(compressed, evt)
 	}
 	b.events = compressed
@@ -347,26 +296,53 @@ func GeneratePrompt(semanticContext []SemanticEvent) {
 
 	prompt := fmt.Sprintf(`
 You are an expert Golang automation engineer using Go Rod. 
-Generate a robust, production-ready script based on the semantic session history.
+Your goal is to convert the raw recorded session below into a reusable, production-ready Go function.
 
 SEMANTIC CONTEXT:
 %s
 
 ---
 
-### SUB-TASK: VARIABLE ABSTRACTION
-I have performed a semantic analysis on the user inputs (see the 'nlp' field in the JSON).
-1. Look at 'nlp.tokens'.
-2. If a token has a 'b' (bucket) field, it is a VARIABLE.
-3. DO NOT hardcode these values. Create a Go function signature accepting these variables.
-   - Example JSON: {"t": "sushi", "b": "cuisineType"}
-   - Result: func Search(cuisineType string) { ... }
+### SUB-TASK 1: SMART SELECTOR GENERATION (CRITICAL)
+The 'selector' field in the JSON is often brittle (e.g., dynamic IDs or obfuscated class names).
+**You must generate robust selectors by analyzing the 'attr' (attributes) map.**
+
+**Priority Order for Selectors:**
+1. **Accessibility Attributes (Best)**: If you see 'aria-label', 'aria-placeholder', or 'role', use them.
+   - *JSON*: {"tag": "input", "attr": {"aria-label": "Search Reddit"}}
+   - *Code*: page.MustElement("input[aria-label='Search Reddit']")
+2. **Visual Attributes (Good)**: If you see 'placeholder' or 'title', use them.
+   - *JSON*: {"tag": "input", "attr": {"placeholder": "Search..."}}
+   - *Code*: page.MustElement("input[placeholder='Search...']")
+3. **Text Matching (For Non-Inputs)**: If the element is a Button or Link, ignore the CSS selector and match by text.
+   - *JSON*: {"tag": "button", "text": "Log In"}
+   - *Code*: page.MustElementR("button", "Log In")
+4. **Fallback**: Only use ID or Name if no human-readable attributes exist.
+
+### SUB-TASK2: SEMANTIC VARIABLE EXTRACTION & GENERALIZATION
+You must transform this rigid recording into a flexible automation flow.
+
+**Phase 1: Token Analysis (Fixed vs. Variable)**
+1. Analyze user inputs in the JSON. Break them into "Fixed Tokens" (structure) and "Variable Tokens" (user intent).
+2. **Bucketing:** For Variable Tokens, assign a generic CamelCase name (e.g., 'sushi' -> 'cuisineType', 'harry potter' -> 'searchTopic').
+3. **Signature:** Create a function signature accepting these variables: 'func RunFlow(page *rod.Page, searchTopic string)'.
+
+**Phase 2: Contextual Generalization (The "Search vs. Direct Link" Rule)**
+Crucial: You must identify where these variable tokens appear LATER in the session (in URLs, selectors, or text matches) and generalize the action.
+
+1. **Deep Link Sanitization:** - If the recording shows a navigation to a URL containing a variable token (e.g., 'reddit.com/r/HarryPotter'), **DO NOT** hardcode this URL.
+   - **Reasoning:** If the user changes 'Harry Potter' to 'Lord of the Rings', the 'HarryPotter' URL is invalid.
+   - **Solution:** Navigate to the **generic base URL** (e.g., 'reddit.com') and deduce the next steps (using search bars or menus) based on the user's previous intent.
+
+2. **Cross-Step Replacement:**
+   - If a selector relies on text that matches a variable (e.g., clicking a link with text "History of Harry Potter"), replace the hardcoded string with the variable.
+   - Code: 'page.MustElementR("a", searchTopic).MustClick()'
 
 ### CRITICAL RULES FOR ROBUSTNESS:
 1. **Handle Navigation**: 'action_type: navigate' -> 'page.MustNavigate("url").MustWaitLoad()'.
 2. **Wait for Visibility**: Always chain '.MustWaitVisible()' before clicking or typing.
 3. **Wait for Stability**: Use '.MustWaitStable()' for animations.
-4. **Debouncing**: The JSON inputs are already debounced. Use the final value provided.
+4. **Smart Selectors**: If a selector looks unstable, use 'page.MustElementR(...)' to match by text.
 
 Output ONLY the Go code.
 `, string(ctxBytes))
@@ -394,7 +370,7 @@ func main() {
 	builder := NewSemanticBuilder()
 	builder.Process(rawEvents)
 
-	// 3. Compress, Debounce, & Extract Variables
+	// 3. Compress & Clean
 	builder.PostProcess()
 
 	// 4. Generate LLM Prompt

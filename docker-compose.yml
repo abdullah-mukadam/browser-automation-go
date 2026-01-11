@@ -1,0 +1,159 @@
+version: "3.8"
+
+services:
+  # MySQL Database
+  mysql:
+    image: mysql:8.0
+    container_name: automator-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: automator
+      MYSQL_USER: automator
+      MYSQL_PASSWORD: automator
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - automator-network
+
+  # Temporal Server
+  temporal:
+    image: temporalio/auto-setup:1.22
+    container_name: automator-temporal
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      - DB=mysql
+      - DB_PORT=3306
+      - MYSQL_USER=root
+      - MYSQL_PWD=rootpassword
+      - MYSQL_SEEDS=mysql
+    ports:
+      - "7233:7233"
+    networks:
+      - automator-network
+
+  # Temporal Web UI
+  temporal-ui:
+    image: temporalio/ui:latest
+    container_name: automator-temporal-ui
+    depends_on:
+      - temporal
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+      - TEMPORAL_CSRF_COOKIE_INSECURE=true
+    ports:
+      - "8233:8080"
+    networks:
+      - automator-network
+
+  # Ollama for local LLM
+  ollama:
+    image: ollama/ollama:latest
+    container_name: automator-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - automator-network
+    # Uncomment for GPU support
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # API Server
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: automator-api
+    depends_on:
+      - mysql
+      - temporal
+      - ollama
+    environment:
+      - PORT=8080
+      - MYSQL_DSN=automator:automator@tcp(mysql:3306)/automator?parseTime=true
+      - TEMPORAL_HOST=temporal:7233
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=tinyllama
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-AIzaSyBOBhPPgibxrilxxTX-mPridkRqJ6mpx_w}
+    ports:
+      - "8080:8080"
+    volumes:
+      - uploads_data:/tmp/uploads
+      - screenshots_data:/tmp/screenshots
+    networks:
+      - automator-network
+    restart: unless-stopped
+
+  # Temporal Worker
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: automator-worker
+    depends_on:
+      - temporal
+      - ollama
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=tinyllama
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-AIzaSyBOBhPPgibxrilxxTX-mPridkRqJ6mpx_w}
+      - SCREENSHOT_DIR=/tmp/screenshots
+      # Set HEADLESS=false to enable VNC viewing of browser
+      - HEADLESS=${HEADLESS:-false}
+      - VNC_PORT=5900
+    ports:
+      # VNC port - connect with VNC viewer when HEADLESS=false
+      - "5900:5900"
+    volumes:
+      - screenshots_data:/tmp/screenshots
+    networks:
+      - automator-network
+    restart: unless-stopped
+
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: automator-frontend
+    depends_on:
+      - api
+    ports:
+      - "3000:80"
+    environment:
+      - VITE_API_URL=http://localhost:8080
+    networks:
+      - automator-network
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  ollama_data:
+  uploads_data:
+  screenshots_data:
+
+networks:
+  automator-network:
+    driver: bridge

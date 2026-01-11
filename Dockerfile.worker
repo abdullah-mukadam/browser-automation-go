@@ -1,0 +1,66 @@
+# Build stage
+# Build stage
+FROM golang:1.23-alpine AS builder
+
+WORKDIR /app
+
+# Install dependencies
+RUN apk add --no-cache git
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source
+COPY . .
+
+# Build
+RUN CGO_ENABLED=0 GOOS=linux go build -o /worker ./cmd/worker
+
+# Runtime stage - Full Chromium with VNC for headless/non-headless support
+FROM debian:bookworm-slim
+
+# Install Chromium, VNC server, and utilities
+RUN apt-get update && apt-get install -y \
+    chromium \
+    chromium-driver \
+    ca-certificates \
+    fonts-liberation \
+    libnss3 \
+    libxss1 \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libgtk-3-0 \
+    libdrm2 \
+    libgbm1 \
+    xvfb \
+    x11vnc \
+    fluxbox \
+    supervisor \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy binary
+COPY --from=builder /worker .
+
+# Copy supervisor config
+COPY worker-supervisor.conf /etc/supervisor/conf.d/worker.conf
+
+# Create directories
+RUN mkdir -p /tmp/screenshots /var/log/supervisor
+
+# Environment variables for Chrome
+ENV CHROME_BIN=/usr/bin/chromium
+ENV CHROME_PATH=/usr/bin/chromium
+ENV DISPLAY=:99
+# HEADLESS=true means run without VNC display, HEADLESS=false starts VNC
+ENV HEADLESS=true
+# VNC port for non-headless viewing
+ENV VNC_PORT=5900
+
+# Expose VNC port
+EXPOSE 5900
+
+# Run via supervisor (manages Xvfb, VNC, fluxbox, and worker)
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]

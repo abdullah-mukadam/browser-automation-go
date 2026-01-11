@@ -1,68 +1,118 @@
-[
-  {
-    "sequence_id": 1,
-    "action_type": "input",
-    "target": {
-      "tag": "textarea",
-      "text": "Search",
-      "selector": "#APjFqb",
-      "attributes": {
-        "class": "gLFyf",
-        "id": "APjFqb",
-        "name": "q",
-        "placeholder": "",
-        "role": "combobox"
-      }
-    },
-    "input_value": "best sushi restaurants in nyc",
-    "interaction_rank": "High",
-    "new_elements_appeared": null
+{
+  "_doc": "Semantic Actions Schema - Extracted from hybrid_events.json",
+  "extraction_flow": {
+    "1_parse": "Parse hybrid_events.json containing rrweb + custom events",
+    "2_build_registry": "Build DOM node registry from rrweb FullSnapshot (type=2)",
+    "3_extract_navigation": "Extract 'navigate' actions from rrweb Meta events (type=4) with href",
+    "4_extract_rrweb_incremental": "Extract actions from rrweb Incremental events (type=3)",
+    "5_extract_custom": "Extract actions from custom events (click, input, keydown, scroll)",
+    "6_post_process": "Deduplicate, debounce inputs, enrich selectors, filter low-value"
   },
-  {
-    "sequence_id": 30,
-    "action_type": "click",
-    "target": {
-      "tag": "textarea",
-      "text": "Search",
-      "selector": "#APjFqb",
-      "attributes": {
-        "class": "gLFyf",
-        "id": "APjFqb",
-        "name": "q",
-        "placeholder": "",
-        "role": "combobox"
-      }
-    },
-    "interaction_rank": "High",
-    "new_elements_appeared": null
+  "rrweb_event_types": {
+    "0": "DOMContentLoaded - page started loading",
+    "1": "Load - page fully loaded",
+    "2": "FullSnapshot - complete DOM tree (used for node registry)",
+    "3": "IncrementalSnapshot - mutations, clicks, inputs, etc",
+    "4": "Meta - contains href URL, viewport size (used for navigation)",
+    "5": "Custom - custom rrweb events"
   },
-  {
-    "sequence_id": 31,
-    "action_type": "input",
-    "target": {
-      "tag": "textarea",
-      "text": "Search",
-      "selector": "#APjFqb",
-      "attributes": {
-        "class": "gLFyf",
-        "id": "APjFqb",
-        "name": "q",
-        "placeholder": "",
-        "role": "combobox"
-      }
-    },
-    "interaction_rank": "High",
-    "new_elements_appeared": null
+  "rrweb_incremental_sources": {
+    "0_Mutation": "DOM mutations (adds/removes) - NOT directly used, builds registry",
+    "1_MouseMove": "Mouse movements - NOT used (too noisy)",
+    "2_MouseInteraction": "Clicks, dblclick, rightclick, focus, blur → ACTIONS",
+    "3_Scroll": "Scroll events - filtered (low value for automation)",
+    "4_ViewportResize": "Viewport changes - NOT used",
+    "5_Input": "Form input changes → INPUT actions",
+    "6_TouchMove": "Touch movements - NOT used",
+    "7_MediaInteraction": "Video/audio play, pause, seek → MEDIA actions",
+    "8_StyleSheetRule": "CSS changes - NOT used",
+    "9_CanvasMutation": "Canvas changes - NOT used",
+    "10_Font": "Font loading - NOT used",
+    "11_Log": "Console logs - NOT used",
+    "12_Drag": "Drag events → DRAG actions",
+    "13_StyleDeclaration": "Inline style changes - NOT used",
+    "14_Selection": "Text selection → SELECT actions",
+    "15_AdoptedStyleSheet": "Adopted stylesheets - NOT used",
+    "16_CustomElement": "Custom element mutations - NOT used"
   },
-  {
-    "sequence_id": 41,
-    "action_type": "keypress",
-    "target": {
-      "tag": "unknown",
-      "selector": "#APjFqb"
+  "custom_event_types": {
+    "click": "Mouse click → ActionClick",
+    "input": "Text input → ActionInput",
+    "keydown": "Key press → ActionKeypress (or copy/paste/cut with modifiers)",
+    "keypress": "Key press → ActionKeypress",
+    "scroll": "Scroll → ActionScroll (filtered as low value)"
+  },
+  "action_types": {
+    "navigate": "Navigate to URL (from rrweb meta href)",
+    "click": "Single click (from custom or rrweb MouseInteraction)",
+    "dblclick": "Double click (from rrweb MouseInteraction type=4)",
+    "rightclick": "Right/context click (from rrweb MouseInteraction type=3)",
+    "input": "Type text (from custom or rrweb Input)",
+    "keypress": "Keyboard key",
+    "scroll": "Scroll (filtered)",
+    "hover": "Mouse hover",
+    "focus": "Element focus (from rrweb MouseInteraction type=5)",
+    "blur": "Element blur (from rrweb MouseInteraction type=6)",
+    "select": "Text selection (from rrweb Selection)",
+    "copy": "Ctrl+C (from keypress with modifier)",
+    "paste": "Ctrl+V (from keypress with modifier)",
+    "cut": "Ctrl+X (from keypress with modifier)",
+    "drag": "Drag start (from rrweb Drag)",
+    "drop": "Drop",
+    "media_play": "Video/audio play (from rrweb MediaInteraction type=0)",
+    "media_pause": "Video/audio pause (from rrweb MediaInteraction type=1)",
+    "media_seek": "Video/audio seek (from rrweb MediaInteraction type=2)",
+    "file_upload": "File input",
+    "submit": "Form submit"
+  },
+  "interaction_ranks": {
+    "High": "button, a, input, select, textarea, navigate, click, dblclick, input",
+    "Medium": "div/span/li with button/btn/click in selector, focus, drag, select, media",
+    "Low": "other elements, scroll, blur"
+  },
+  "example_workflow": [
+    {
+      "sequence_id": 1,
+      "action_type": "navigate",
+      "value": "https://google.com",
+      "rank": "High",
+      "source": "rrweb_meta"
     },
-    "input_value": "Enter",
-    "interaction_rank": "Low",
-    "new_elements_appeared": null
-  }
-]
+    {
+      "sequence_id": 2,
+      "action_type": "click",
+      "target": "#search-input",
+      "rank": "High",
+      "source": "custom_click"
+    },
+    {
+      "sequence_id": 3,
+      "action_type": "input",
+      "value": "search query",
+      "target": "#search-input",
+      "rank": "High",
+      "source": "rrweb_input"
+    },
+    {
+      "sequence_id": 4,
+      "action_type": "keypress",
+      "value": "Enter",
+      "rank": "Medium",
+      "source": "custom_keydown"
+    },
+    {
+      "sequence_id": 5,
+      "action_type": "navigate",
+      "value": "https://google.com/search?q=...",
+      "rank": "High",
+      "source": "rrweb_meta"
+    },
+    {
+      "sequence_id": 6,
+      "action_type": "click",
+      "target": "a.result-link",
+      "rank": "High",
+      "source": "rrweb_mouse_interaction"
+    }
+  ]
+}
