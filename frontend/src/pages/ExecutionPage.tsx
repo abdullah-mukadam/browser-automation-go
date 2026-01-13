@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
-import { useQuery, useMutation } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import 'reactflow/dist/style.css'
-import { Play, Square, Settings } from 'lucide-react'
+import { Play, Square, Settings, Key, Check, ChevronDown, ChevronUp } from 'lucide-react'
 import axios from 'axios'
 import WorkflowGraph from '../components/WorkflowGraph'
 
@@ -50,12 +50,15 @@ const API_URL = ''
 
 function ExecutionPage() {
     const { id } = useParams<{ id: string }>()
+    const queryClient = useQueryClient()
     const [parameters, setParameters] = useState<Record<string, string>>({})
-    const [llmProvider, setLlmProvider] = useState('ollama')
+    const [llmProvider, setLlmProvider] = useState('')
     const [headless, setHeadless] = useState(true)
     const [currentRun, setCurrentRun] = useState<WorkflowRun | null>(null)
     const [runHistory, setRunHistory] = useState<(WorkflowRun & { parameters?: Record<string, string> })[]>([])
     const [ws, setWs] = useState<WebSocket | null>(null)
+    const [showApiKeys, setShowApiKeys] = useState(false)
+    const [apiKeys, setApiKeys] = useState<Record<string, string>>({ openai: '', anthropic: '', gemini: '' })
 
     // Fetch workflow
     const { data: workflow, isLoading } = useQuery<Workflow>({
@@ -75,6 +78,20 @@ function ExecutionPage() {
             return res.data || []
         },
     })
+
+    // Set default provider (excluding ollama)
+    useEffect(() => {
+        if (providers?.length > 0 && !llmProvider) {
+            const valid = providers.find((p: any) => p.name !== 'ollama')
+            if (valid) {
+                setLlmProvider(valid.name)
+            } else {
+                // Fallback to first available if all else fails
+                const first = providers.find((p: any) => p.available)
+                if (first) setLlmProvider(first.name)
+            }
+        }
+    }, [providers, llmProvider])
 
     // Initialize parameters with defaults
     useEffect(() => {
@@ -237,12 +254,68 @@ function ExecutionPage() {
                             onChange={(e) => setLlmProvider(e.target.value)}
                             disabled={isRunning}
                         >
-                            {providers?.map((p: { name: string; available: boolean }) => (
+                            {providers?.filter((p: { name: string }) => p.name !== 'ollama').map((p: { name: string; display: string; available: boolean; has_key: boolean }) => (
                                 <option key={p.name} value={p.name} disabled={!p.available}>
-                                    {p.name} {!p.available && '(unavailable)'}
+                                    {p.display} {!p.has_key ? '(no key)' : !p.available ? '(unavailable)' : ''}
                                 </option>
                             ))}
                         </select>
+                    </div>
+
+                    {/* API Keys Section */}
+                    <div className="form-group mt-md">
+                        <button
+                            type="button"
+                            className="flex items-center gap-sm text-sm"
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: 0 }}
+                            onClick={() => setShowApiKeys(!showApiKeys)}
+                        >
+                            <Key size={14} />
+                            API Keys
+                            {showApiKeys ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                        </button>
+                        {showApiKeys && (
+                            <div className="mt-md" style={{ padding: '0.75rem', background: 'var(--bg-tertiary)', borderRadius: '0.5rem' }}>
+                                {['openai', 'anthropic', 'gemini'].map((provider) => {
+                                    const providerInfo = providers?.find((p: { name: string }) => p.name === provider)
+                                    const hasKey = providerInfo?.has_key
+                                    return (
+                                        <div key={provider} className="form-group" style={{ marginBottom: '0.5rem' }}>
+                                            <label className="form-label text-sm" style={{ textTransform: 'capitalize' }}>
+                                                {provider} API Key
+                                                {hasKey && <Check size={12} style={{ color: 'var(--accent-success)', marginLeft: '0.5rem' }} />}
+                                            </label>
+                                            <div className="flex gap-sm">
+                                                <input
+                                                    className="form-input"
+                                                    type="password"
+                                                    value={apiKeys[provider]}
+                                                    onChange={(e) => setApiKeys(prev => ({ ...prev, [provider]: e.target.value }))}
+                                                    placeholder={hasKey ? '••••••••••' : 'Enter API key'}
+                                                    style={{ flex: 1, fontSize: '0.85rem' }}
+                                                />
+                                                <button
+                                                    className="btn btn-sm"
+                                                    style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
+                                                    disabled={!apiKeys[provider]}
+                                                    onClick={async () => {
+                                                        try {
+                                                            await axios.post(`${API_URL}/api/llm/providers/${provider}/key`, { api_key: apiKeys[provider] })
+                                                            queryClient.invalidateQueries({ queryKey: ['llm-providers'] })
+                                                            setApiKeys(prev => ({ ...prev, [provider]: '' }))
+                                                        } catch (err) {
+                                                            console.error('Failed to save API key:', err)
+                                                        }
+                                                    }}
+                                                >
+                                                    Save
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )
+                                })}
+                            </div>
+                        )}
                     </div>
 
                     {/* Headless Mode */}

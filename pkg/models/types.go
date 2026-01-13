@@ -292,14 +292,16 @@ type ActionResult struct {
 
 // WorkflowInput represents input for executing a workflow
 type WorkflowInput struct {
-	WorkflowID    string            `json:"workflow_id"`
-	RunID         string            `json:"run_id"`
-	Parameters    map[string]string `json:"parameters"`
-	Actions       []SemanticAction  `json:"actions"`
-	LLMProvider   string            `json:"llm_provider"`
-	Headless      bool              `json:"headless"`
-	Timeout       int               `json:"timeout_seconds"`
-	RetryAttempts int               `json:"retry_attempts"`
+	WorkflowID    string              `json:"workflow_id"`
+	RunID         string              `json:"run_id"`
+	Parameters    map[string]string   `json:"parameters"`
+	Params        []WorkflowParameter `json:"params"`
+	Actions       []SemanticAction    `json:"actions"`
+	LLMProvider   string              `json:"llm_provider"`
+	LLMAPIKey     string              `json:"llm_api_key,omitempty"` // API key from UI
+	Headless      bool                `json:"headless"`
+	Timeout       int                 `json:"timeout_seconds"`
+	RetryAttempts int                 `json:"retry_attempts"`
 }
 
 // WorkflowResult represents the result of a workflow execution

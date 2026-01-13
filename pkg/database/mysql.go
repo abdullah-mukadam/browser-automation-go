@@ -352,6 +352,52 @@ func (db *DB) ListWorkflowRuns(ctx context.Context, workflowID string) ([]models
 	return runs, nil
 }
 
+// ListAllWorkflowRuns retrieves all recent runs
+func (db *DB) ListAllWorkflowRuns(ctx context.Context, limit int) ([]models.WorkflowRun, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	query := `
+		SELECT id, workflow_id, temporal_run_id, temporal_workflow_id, status,
+		       parameters, started_at, completed_at, error_message
+		FROM workflow_runs
+		ORDER BY started_at DESC
+		LIMIT ?
+	`
+
+	rows, err := db.conn.QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list all runs: %w", err)
+	}
+	defer rows.Close()
+
+	var runs []models.WorkflowRun
+	for rows.Next() {
+		var run models.WorkflowRun
+		var errorMessage sql.NullString
+		err := rows.Scan(
+			&run.ID,
+			&run.WorkflowID,
+			&run.TemporalRunID,
+			&run.TemporalWorkflowID,
+			&run.Status,
+			&run.ParametersJSON,
+			&run.StartedAt,
+			&run.CompletedAt,
+			&errorMessage,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan run: %w", err)
+		}
+		if errorMessage.Valid {
+			run.ErrorMessage = errorMessage.String
+		}
+		runs = append(runs, run)
+	}
+
+	return runs, nil
+}
+
 // UpdateWorkflowRunStatus updates the status of a workflow run
 func (db *DB) UpdateWorkflowRunStatus(ctx context.Context, id string, status models.RunStatus, errorMsg string) error {
 	query := `
@@ -362,6 +408,18 @@ func (db *DB) UpdateWorkflowRunStatus(ctx context.Context, id string, status mod
 	`
 
 	_, err := db.conn.ExecContext(ctx, query, status, errorMsg, status, id)
+	return err
+}
+
+// UpdateWorkflowRunStarted updates a workflow run when it starts executing
+func (db *DB) UpdateWorkflowRunStarted(ctx context.Context, id, temporalWorkflowID, temporalRunID string) error {
+	query := `
+		UPDATE workflow_runs
+		SET temporal_workflow_id = ?, temporal_run_id = ?, status = 'running', started_at = NOW()
+		WHERE id = ?
+	`
+
+	_, err := db.conn.ExecContext(ctx, query, temporalWorkflowID, temporalRunID, id)
 	return err
 }
 

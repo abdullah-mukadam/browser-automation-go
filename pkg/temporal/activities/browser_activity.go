@@ -169,7 +169,6 @@ func (a *Activities) PreGenerateCodeActivity(ctx context.Context, input workflow
 	}
 
 	// Get LLM provider
-	// Get LLM provider
 	var llmProvider llm.Provider
 	providerName := input.LLMProvider
 	if providerName == "" {
@@ -177,7 +176,18 @@ func (a *Activities) PreGenerateCodeActivity(ctx context.Context, input workflow
 		logger.Info("LLM provider not specified, defaulting to ollama")
 	}
 
+	// Use API key from input if provided (from UI), otherwise use config
 	if config, ok := a.LLMConfigs[providerName]; ok {
+		if input.LLMAPIKey != "" {
+			config.APIKey = input.LLMAPIKey
+			logger.Info("Using API key from workflow input", "provider", providerName)
+		}
+		llmProvider, _ = llm.NewProvider(config)
+	} else if input.LLMAPIKey != "" {
+		// Create provider with default config + API key from input
+		config := llm.DefaultConfigs()[llm.ProviderName(providerName)]
+		config.APIKey = input.LLMAPIKey
+		logger.Info("Creating provider with API key from input", "provider", providerName)
 		llmProvider, _ = llm.NewProvider(config)
 	} else {
 		logger.Warn("LLM provider config not found", "provider", providerName, "available", getProviderNames(a.LLMConfigs))
@@ -373,21 +383,53 @@ func (a *Activities) executeAction(page *rod.Page, action models.SemanticAction,
 
 	case models.ActionClick:
 		selector := a.getBestSelector(action)
-		elem, err := page.Element(selector)
+		var elem *rod.Element
+		var err error
+
+		if selector == "" && action.Target.Text != "" {
+			elem, err = page.ElementR(action.Target.Tag, action.Target.Text)
+		} else {
+			elem, err = page.Element(selector)
+		}
+
 		if err != nil {
-			return fmt.Errorf("element not found: %s", selector)
+			return fmt.Errorf("element not found: %s (text: %s)", selector, action.Target.Text)
 		}
 		return elem.Click(proto.InputMouseButtonLeft, 1)
 
 	case models.ActionInput:
 		selector := a.getBestSelector(action)
-		elem, err := page.Element(selector)
+		var elem *rod.Element
+		var err error
+
+		if selector == "" && action.Target.Text != "" {
+			elem, err = page.ElementR(action.Target.Tag, action.Target.Text)
+		} else {
+			elem, err = page.Element(selector)
+		}
+
 		if err != nil {
-			return fmt.Errorf("element not found: %s", selector)
+			return fmt.Errorf("element not found: %s (text: %s)", selector, action.Target.Text)
 		}
 		// Clear existing text and input new value
 		elem.MustSelectAllText()
 		return elem.Input(value)
+
+	case models.ActionFocus:
+		selector := a.getBestSelector(action)
+		elem, err := page.Element(selector)
+		if err != nil {
+			return fmt.Errorf("element not found: %s", selector)
+		}
+		return elem.Focus()
+
+	case models.ActionBlur:
+		selector := a.getBestSelector(action)
+		elem, err := page.Element(selector)
+		if err != nil {
+			return fmt.Errorf("element not found: %s", selector)
+		}
+		return elem.Blur()
 
 	case models.ActionKeypress:
 		key := getKeyFromValue(value)

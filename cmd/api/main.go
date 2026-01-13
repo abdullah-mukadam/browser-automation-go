@@ -102,6 +102,8 @@ func main() {
 
 	// LLM providers
 	apiRouter.HandleFunc("/llm/providers", handlers.ListLLMProviders).Methods("GET")
+	apiRouter.HandleFunc("/llm/providers/{name}/key", handlers.SetAPIKey).Methods("POST")
+	apiRouter.HandleFunc("/llm/providers/{name}/key", handlers.DeleteAPIKey).Methods("DELETE")
 
 	// Screenshots
 	apiRouter.HandleFunc("/screenshots/{filename}", handlers.ServeScreenshot).Methods("GET")

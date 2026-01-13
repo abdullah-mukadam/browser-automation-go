@@ -29,6 +29,7 @@ type Handlers struct {
 	db               *database.DB
 	temporalClient   client.Client
 	llmConfigs       map[string]llm.Config
+	runtimeAPIKeys   map[string]string // API keys submitted via UI
 	embeddingService *semantic.EmbeddingService
 	upgrader         websocket.Upgrader
 }
@@ -44,6 +45,7 @@ func NewHandlers(
 		db:               db,
 		temporalClient:   temporalClient,
 		llmConfigs:       llmConfigs,
+		runtimeAPIKeys:   make(map[string]string),
 		embeddingService: embeddingService,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
@@ -134,22 +136,13 @@ func (h *Handlers) CreateWorkflow(w http.ResponseWriter, r *http.Request) {
 
 	// Identify variable tokens using semantic classification
 	var classifier semantic.ValueClassifier
-
-	// Try to get a provider for classification
-	// We prefer Ollama for this task as it's lightweight/local
-	providerName := "ollama"
-	config, ok := h.llmConfigs[providerName]
-	if !ok {
-		// Fallback to any configured provider
-		for name, cfg := range h.llmConfigs {
-			providerName = name
-			config = cfg
-			break
+	if provider := r.FormValue("llm_provider"); provider != "" {
+		config := llm.Config{
+			Provider: provider,
 		}
-	}
-
-	if p, err := llm.NewProvider(config); err == nil {
-		classifier = p
+		if p, err := llm.NewProvider(config); err == nil {
+			classifier = p
+		}
 	}
 
 	params := extractor.IdentifyVariableTokens(r.Context(), actions, classifier)
@@ -364,6 +357,21 @@ func (h *Handlers) ExecuteWorkflow(w http.ResponseWriter, r *http.Request) {
 
 	actions, _ := h.db.GetSemanticActions(ctx, workflowID)
 
+	// Filter actions to remove noise (focus/blur and low-rank clicks)
+	filteredActions := make([]models.SemanticAction, 0, len(actions))
+	for _, action := range actions {
+		// Filter out Focus/Blur actions as they are unreliable/noisy
+		if action.ActionType == models.ActionFocus || action.ActionType == models.ActionBlur {
+			continue
+		}
+		// Filter out low-importance clicks (unless rank is not set)
+		if action.ActionType == models.ActionClick && action.InteractionRank == models.RankLow {
+			continue
+		}
+		filteredActions = append(filteredActions, action)
+	}
+	actions = filteredActions
+
 	// Create run record
 	runID := uuid.New().String()
 	paramsJSON, _ := json.Marshal(req.Parameters)
@@ -381,12 +389,29 @@ func (h *Handlers) ExecuteWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Start Temporal workflow
+	// Get API key from runtime keys if available
+	llmAPIKey := ""
+	if key, ok := h.runtimeAPIKeys[req.LLMProvider]; ok {
+		llmAPIKey = key
+	} else if config, ok := h.llmConfigs[req.LLMProvider]; ok {
+		llmAPIKey = config.APIKey
+	}
+
+	// Parse workflow parameter definitions
+	var paramsDef []models.WorkflowParameter
+	if workflow.ParametersJSON != "" {
+		// Ignore error if parameters are malformed, treat as empty
+		_ = json.Unmarshal([]byte(workflow.ParametersJSON), &paramsDef)
+	}
+
 	input := models.WorkflowInput{
 		WorkflowID:    workflowID,
 		RunID:         runID,
 		Parameters:    req.Parameters,
+		Params:        paramsDef,
 		Actions:       actions,
 		LLMProvider:   req.LLMProvider,
+		LLMAPIKey:     llmAPIKey,
 		Headless:      req.Headless,
 		Timeout:       300,
 		RetryAttempts: 3,
@@ -404,14 +429,8 @@ func (h *Handlers) ExecuteWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update run with Temporal IDs
-	run.TemporalWorkflowID = we.GetID()
-	run.TemporalRunID = we.GetRunID()
-	run.Status = models.StatusRunning
-	now := time.Now()
-	run.StartedAt = &now
-
-	h.db.CreateWorkflowRun(ctx, run) // Update with Temporal IDs
+	// Update run with Temporal IDs and mark as running
+	h.db.UpdateWorkflowRunStarted(ctx, runID, we.GetID(), we.GetRunID())
 
 	respondJSON(w, map[string]interface{}{
 		"run_id":               runID,
@@ -437,8 +456,8 @@ func (h *Handlers) ListRuns(w http.ResponseWriter, r *http.Request) {
 	if workflowID != "" {
 		runs, err = h.db.ListWorkflowRuns(ctx, workflowID)
 	} else {
-		// List all recent runs (would need to add this method)
-		runs = []models.WorkflowRun{}
+		// List all recent runs
+		runs, err = h.db.ListAllWorkflowRuns(ctx, 50)
 	}
 
 	if err != nil {
@@ -538,8 +557,9 @@ func (h *Handlers) StreamRunUpdates(w http.ResponseWriter, r *http.Request) {
 
 			// Try to query Temporal workflow directly for real-time progress
 			if h.temporalClient != nil {
-				// Query workflow for progress
-				queryResp, err := h.temporalClient.QueryWorkflow(ctx, runID, "", "getProgress")
+				// Query workflow for progress using the correct workflow ID format
+				temporalWorkflowID := fmt.Sprintf("browser-automation-%s", runID)
+				queryResp, err := h.temporalClient.QueryWorkflow(ctx, temporalWorkflowID, "", "getProgress")
 				if err == nil {
 					var result models.WorkflowResult
 					if queryResp.Get(&result) == nil {
@@ -577,6 +597,19 @@ func (h *Handlers) StreamRunUpdates(w http.ResponseWriter, r *http.Request) {
 
 				// Close if completed
 				if status == models.StatusSuccess || status == models.StatusFailed || status == models.StatusCanceled {
+					// Update database with final status
+					if h.db != nil {
+						errorMsg := ""
+						if status == models.StatusFailed {
+							for _, ar := range actionResults {
+								if ar.ErrorMessage != "" {
+									errorMsg = ar.ErrorMessage
+									break
+								}
+							}
+						}
+						h.db.UpdateWorkflowRunStatus(ctx, runID, status, errorMsg)
+					}
 					return
 				}
 			}
@@ -586,24 +619,123 @@ func (h *Handlers) StreamRunUpdates(w http.ResponseWriter, r *http.Request) {
 
 // ==================== LLM Handlers ====================
 
-// ListLLMProviders lists available LLM providers
+// ListLLMProviders lists all available LLM providers with their status
 func (h *Handlers) ListLLMProviders(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
+	// Define all supported providers
+	allProviders := []struct {
+		name        string
+		displayName string
+		requiresKey bool
+	}{
+		{"ollama", "Ollama", false},
+		{"openai", "OpenAI", true},
+		{"anthropic", "Anthropic", true},
+		{"gemini", "Gemini", true},
+	}
+
 	providers := make([]map[string]interface{}, 0)
 
-	for name, config := range h.llmConfigs {
-		provider, _ := llm.NewProvider(config)
-		available := provider != nil && provider.IsAvailable(ctx)
+	for _, p := range allProviders {
+		// Check if we have a config (from env) or runtime key
+		config, hasEnvConfig := h.llmConfigs[p.name]
+		runtimeKey, hasRuntimeKey := h.runtimeAPIKeys[p.name]
+
+		hasKey := false
+		available := false
+
+		if p.requiresKey {
+			// Check if API key is available from env or runtime
+			hasKey = (hasEnvConfig && config.APIKey != "") || hasRuntimeKey
+
+			if hasKey {
+				// Create config with runtime key if needed
+				testConfig := config
+				if hasRuntimeKey {
+					testConfig = llm.DefaultConfigs()[llm.ProviderName(p.name)]
+					testConfig.APIKey = runtimeKey
+				}
+				provider, _ := llm.NewProvider(testConfig)
+				available = provider != nil && provider.IsAvailable(ctx)
+			}
+		} else {
+			// Ollama doesn't require a key
+			hasKey = true
+			if hasEnvConfig {
+				provider, _ := llm.NewProvider(config)
+				available = provider != nil && provider.IsAvailable(ctx)
+			}
+		}
 
 		providers = append(providers, map[string]interface{}{
-			"name":      name,
-			"model":     config.Model,
+			"name":      p.name,
+			"display":   p.displayName,
+			"has_key":   hasKey,
 			"available": available,
 		})
 	}
 
 	respondJSON(w, providers)
+}
+
+// SetAPIKey sets an API key for a provider
+func (h *Handlers) SetAPIKey(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	providerName := vars["name"]
+
+	// Validate provider name
+	validProviders := map[string]bool{"openai": true, "anthropic": true, "gemini": true}
+	if !validProviders[providerName] {
+		http.Error(w, "Invalid provider name", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		APIKey string `json:"api_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.APIKey == "" {
+		http.Error(w, "API key is required", http.StatusBadRequest)
+		return
+	}
+
+	// Store the runtime API key
+	h.runtimeAPIKeys[providerName] = req.APIKey
+
+	// Also update llmConfigs so it's used in workflow execution
+	config := llm.DefaultConfigs()[llm.ProviderName(providerName)]
+	config.APIKey = req.APIKey
+	h.llmConfigs[providerName] = config
+
+	// Verify the key works
+	ctx := r.Context()
+	provider, _ := llm.NewProvider(config)
+	available := provider != nil && provider.IsAvailable(ctx)
+
+	respondJSON(w, map[string]interface{}{
+		"success":   true,
+		"provider":  providerName,
+		"available": available,
+	})
+}
+
+// DeleteAPIKey removes an API key for a provider
+func (h *Handlers) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	providerName := vars["name"]
+
+	delete(h.runtimeAPIKeys, providerName)
+	delete(h.llmConfigs, providerName)
+
+	respondJSON(w, map[string]interface{}{
+		"success":  true,
+		"provider": providerName,
+	})
 }
 
 // ==================== Screenshot Handlers ====================

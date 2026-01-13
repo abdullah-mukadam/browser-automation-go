@@ -47,11 +47,25 @@ func BrowserAutomationWorkflow(ctx workflow.Context, input models.WorkflowInput)
 	// Pre-generate Go Rod code for all actions BEFORE browser initialization
 	logger.Info("Pre-generating Go Rod code for all actions", "actionCount", len(input.Actions), "llmProvider", input.LLMProvider)
 	var preGeneratedCode PreGeneratedCode
-	err = workflow.ExecuteActivity(ctx, "PreGenerateCodeActivity", PreGenerateCodeInput{
+
+	// Use longer timeout for code generation as it processes all actions
+	preGenCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: 15 * time.Minute,
+		HeartbeatTimeout:    60 * time.Second,
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval:    time.Second,
+			BackoffCoefficient: 2.0,
+			MaximumInterval:    time.Minute,
+			MaximumAttempts:    3,
+		},
+	})
+
+	err = workflow.ExecuteActivity(preGenCtx, "PreGenerateCodeActivity", PreGenerateCodeInput{
 		WorkflowID:  input.WorkflowID,
 		Actions:     input.Actions,
 		Parameters:  input.Parameters,
 		LLMProvider: input.LLMProvider,
+		LLMAPIKey:   input.LLMAPIKey,
 	}).Get(ctx, &preGeneratedCode)
 	if err != nil {
 		logger.Warn("Pre-generation failed, will generate code during execution", "error", err.Error())
@@ -65,6 +79,7 @@ func BrowserAutomationWorkflow(ctx workflow.Context, input models.WorkflowInput)
 	err = workflow.ExecuteActivity(ctx, "InitializeBrowserActivity", BrowserInitInput{
 		Headless:    input.Headless,
 		LLMProvider: input.LLMProvider,
+		LLMAPIKey:   input.LLMAPIKey,
 	}).Get(ctx, &browserSession)
 	if err != nil {
 		result.Status = models.StatusFailed
@@ -84,21 +99,57 @@ func BrowserAutomationWorkflow(ctx workflow.Context, input models.WorkflowInput)
 		// Get pre-generated code if available
 		generatedCode := preGeneratedCode.ActionCodes[action.SequenceID]
 
+		// Override action value if it matches a parameter
+		// This ensures that runtime parameters are used instead of recorded values
+		currentAction := action
+		for _, param := range input.Params {
+			if param.TokenType == models.TokenVariable && param.SourceAction == action.SequenceID {
+				if val, ok := input.Parameters[param.Name]; ok {
+					logger.Info("Injecting parameter value", "param", param.Name, "original", action.Value, "new", val)
+					currentAction.Value = val
+				}
+			}
+		}
+
 		actionInput := ActionInput{
 			SessionID:     browserSession.SessionID,
-			Action:        action,
+			Action:        currentAction,
 			Parameters:    input.Parameters,
 			LLMProvider:   input.LLMProvider,
 			GeneratedCode: generatedCode,
 		}
 
 		var actionResult models.ActionResult
-		err := workflow.ExecuteActivity(ctx, "ExecuteBrowserActionActivity", actionInput).Get(ctx, &actionResult)
+
+		// Use specific retry policy for action execution (single retry)
+		actionCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+			StartToCloseTimeout: time.Duration(input.Timeout) * time.Second,
+			HeartbeatTimeout:    30 * time.Second,
+			RetryPolicy: &temporal.RetryPolicy{
+				InitialInterval:    time.Second,
+				BackoffCoefficient: 2.0,
+				MaximumInterval:    time.Minute,
+				MaximumAttempts:    1, // Single attempt, no retries
+			},
+		})
+
+		err := workflow.ExecuteActivity(actionCtx, "ExecuteBrowserActionActivity", actionInput).Get(ctx, &actionResult)
 
 		actionResult.SequenceID = action.SequenceID
 		actionResult.ActionID = action.ID
 
 		if err != nil {
+			// Check for cancellation
+			if temporal.IsCanceledError(err) {
+				actionResult.Status = models.StatusCanceled
+				actionResult.ErrorMessage = "Workflow canceled"
+				result.ActionResults = append(result.ActionResults, actionResult)
+
+				result.Status = models.StatusCanceled
+				result.ErrorMessage = "Workflow canceled by user"
+				break
+			}
+
 			actionResult.Status = models.StatusFailed
 			actionResult.ErrorMessage = err.Error()
 
@@ -134,18 +185,9 @@ func BrowserAutomationWorkflow(ctx workflow.Context, input models.WorkflowInput)
 
 	// Set final status
 	if result.Status != models.StatusFailed {
-		allSuccess := true
-		for _, ar := range result.ActionResults {
-			if ar.Status != models.StatusSuccess {
-				allSuccess = false
-				break
-			}
-		}
-		if allSuccess {
-			result.Status = models.StatusSuccess
-		} else {
-			result.Status = models.StatusFailed
-		}
+		// If we reached here without initialization failure, mark as success
+		// even if individual actions failed, as requested.
+		result.Status = models.StatusSuccess
 	}
 
 	logger.Info("Workflow completed", "status", result.Status, "duration", result.TotalDuration)
@@ -162,6 +204,7 @@ type BrowserSession struct {
 type BrowserInitInput struct {
 	Headless    bool   `json:"headless"`
 	LLMProvider string `json:"llm_provider"`
+	LLMAPIKey   string `json:"llm_api_key,omitempty"`
 }
 
 // ActionInput is the input for executing a browser action
@@ -186,6 +229,7 @@ type PreGenerateCodeInput struct {
 	Actions     []models.SemanticAction `json:"actions"`
 	Parameters  map[string]string       `json:"parameters"`
 	LLMProvider string                  `json:"llm_provider"`
+	LLMAPIKey   string                  `json:"llm_api_key,omitempty"`
 }
 
 // PreGeneratedCode holds pre-generated code for actions
@@ -195,14 +239,7 @@ type PreGeneratedCode struct {
 
 // shouldContinueOnFailure determines if workflow should continue after action failure
 func shouldContinueOnFailure(action models.SemanticAction) bool {
-	// Continue on low-rank actions
-	if action.InteractionRank == models.RankLow {
-		return true
-	}
-	// Don't continue on critical actions
-	if action.ActionType == models.ActionNavigate || action.ActionType == models.ActionInput {
-		return false
-	}
+	// Always continue on failure as requested by user
 	return true
 }
 

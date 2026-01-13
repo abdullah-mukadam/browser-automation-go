@@ -84,6 +84,31 @@ function WorkflowsPage() {
         },
     })
 
+    // Optimize and upload file
+    const optimizeAndUpload = async (file: File) => {
+        setUploadProgress('Optimizing...')
+        try {
+            const text = await file.text()
+            const events = JSON.parse(text)
+
+            // Filter out high-frequency MouseMove events (type 3, source 2)
+            // This significantly reduces upload size and processing time
+            const optimizedEvents = Array.isArray(events) ? events.filter((e: any) => {
+                return !(e.type === 3 && e.data?.source === 2)
+            }) : events
+
+            const blob = new Blob([JSON.stringify(optimizedEvents)], { type: 'application/json' })
+            const optimizedFile = new File([blob], file.name, { type: 'application/json' })
+
+            setUploadProgress('Uploading...')
+            uploadMutation.mutate(optimizedFile)
+        } catch (error) {
+            console.warn('Optimization failed, uploading original:', error)
+            setUploadProgress('Uploading...')
+            uploadMutation.mutate(file)
+        }
+    }
+
     // Handle file drop
     const handleDrop = useCallback((e: React.DragEvent) => {
         e.preventDefault()
@@ -91,16 +116,14 @@ function WorkflowsPage() {
 
         const file = e.dataTransfer.files[0]
         if (file && file.name.endsWith('.json')) {
-            setUploadProgress('Uploading...')
-            uploadMutation.mutate(file)
+            optimizeAndUpload(file)
         }
     }, [uploadMutation])
 
     const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0]
         if (file) {
-            setUploadProgress('Uploading...')
-            uploadMutation.mutate(file)
+            optimizeAndUpload(file)
         }
     }
 

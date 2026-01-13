@@ -353,6 +353,11 @@ func (e *Extractor) filterLowValueActions(actions []models.SemanticAction) []mod
 			continue
 		}
 
+		// Filter Focus and Blur actions as they are often redundant and cause noise
+		if action.ActionType == models.ActionFocus || action.ActionType == models.ActionBlur {
+			continue
+		}
+
 		// High Tolerance: Keep everything
 		if e.tolerance == ToleranceHigh {
 			result = append(result, action)
