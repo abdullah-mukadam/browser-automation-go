@@ -62,7 +62,7 @@ Upload a recording file (`.json`). The system filters noise (like high-frequency
 To view the browser:
 1. Set `HEADLESS=false` in `.env`.
 2. Restart worker: `docker-compose up -d worker`.
-3. Connect via VNC: `vnc://localhost:5900`.
+3. Connect via VNC: `vnc://localhost:5900`. (password is vnc)
 
 ## 🏗️ Architecture
 
