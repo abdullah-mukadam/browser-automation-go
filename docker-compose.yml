@@ -93,7 +93,7 @@ services:
       - OLLAMA_MODEL=tinyllama
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-AIzaSyBOBhPPgibxrilxxTX-mPridkRqJ6mpx_w}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
     ports:
       - "8080:8080"
     volumes:
@@ -118,7 +118,7 @@ services:
       - OLLAMA_MODEL=tinyllama
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-AIzaSyBOBhPPgibxrilxxTX-mPridkRqJ6mpx_w}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - SCREENSHOT_DIR=/tmp/screenshots
       # Set HEADLESS=false to enable VNC viewing of browser
       - HEADLESS=${HEADLESS:-false}
