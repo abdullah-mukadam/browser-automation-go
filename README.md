@@ -1,7 +1,7 @@
 # Browser Automation Workflow System
 
 > **Quick Navigation:**  
-> [🚀 Quick Start](#-quick-start-docker) • [💻 Local Development](#-local-development-setup) • [🔧 Configuration](#-configuration-reference) • [📖 Usage](#-usage-guide) • [🔌 API](#-api-reference) • [🐛 Troubleshooting](#-troubleshooting)
+> [🚀 Setup](#-setup) • [▶️ Running](#️-running-the-system) • [📖 Usage](#-usage-guide) • [🔌 API](#-api-reference) • [🧪 Testing](#-testing) • [🐛 Troubleshooting](#-troubleshooting)
 
 ---
 
@@ -10,16 +10,15 @@
 - [Architecture](#️-architecture)
 - [Features](#-features)
 - [Prerequisites](#-prerequisites)
-- [Quick Start (Docker)](#-quick-start-docker)
-- [Local Development Setup](#-local-development-setup)
-- [Configuration Reference](#-configuration-reference)
+- [Setup](#-setup)
+- [Running the System](#️-running-the-system)
+- [Configuration](#-configuration)
 - [Usage Guide](#-usage-guide)
 - [API Reference](#-api-reference)
 - [Project Structure](#-project-structure)
 - [Testing](#-testing)
 - [Troubleshooting](#-troubleshooting)
-- [Building for Production](#-building-for-production)
-- [GPU Support for Ollama](#-gpu-support-for-ollama)
+- [GPU Support](#-gpu-support)
 - [License](#-license)
 
 ---
@@ -64,51 +63,35 @@ A production-ready browser automation system that converts recorded browser sess
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| Docker | 20.10+ | Required for containerized deployment |
-| Docker Compose | 2.0+ | Required for orchestrating services |
-| Go | 1.23+ | Only for local development |
-| Node.js | 20+ | Only for frontend development |
-| npm | 10+ | Only for frontend development |
+| Docker | 20.10+ | Required |
+| Docker Compose | 2.0+ | Required |
 
 ---
 
-## 🚀 Quick Start (Docker)
+## 🚀 Setup
 
 ### Step 1: Clone & Configure
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/abdullah-mukadam/browser-automation-go.git
 cd browser-automation-go
 
 # Copy environment template
 cp .env.example .env
 ```
 
-### Step 2: Configure Environment Variables
+### Step 2: Configure Environment Variables (Optional)
 
-Edit `.env` and set your LLM API keys (optional—Ollama works locally without keys):
+Edit `.env` to set your LLM API keys. **Ollama works locally without any keys.**
 
 ```bash
-# API Server
-PORT=8080
-
-# MySQL Database
-MYSQL_DSN=automator:automator@tcp(localhost:3306)/automator?parseTime=true
-
-# Temporal
-TEMPORAL_HOST=localhost:7233
-
-# Ollama (Local LLM - no API key needed)
-OLLAMA_HOST=http://localhost:11434
-OLLAMA_MODEL=codellama:13b
-
-# LLM API Keys (Optional)
+# LLM API Keys (Optional - Ollama works without these)
 OPENAI_API_KEY=sk-your-key-here
 ANTHROPIC_API_KEY=sk-ant-your-key-here
 GEMINI_API_KEY=your-gemini-key-here
 
 # Browser Display Mode
-# false = VNC enabled (connect to port 5900)
+# false = VNC enabled (connect to port 5900 to watch)
 # true = headless mode (default)
 HEADLESS=true
 ```
@@ -119,96 +102,70 @@ HEADLESS=true
 docker-compose up -d
 ```
 
-This starts the following services:
-
-| Service | Port | Description |
-|---------|------|-------------|
-| MySQL | 3306 | Database storage |
-| Temporal | 7233 | Workflow engine |
-| Temporal UI | 8233 | Workflow monitoring dashboard |
-| Ollama | 11434 | Local LLM server |
-| API Server | 8080 | REST API backend |
-| Worker | 5900 (VNC) | Temporal worker + Go Rod browser |
-| Frontend | 3000 | React UI |
-
 ### Step 4: Pull Ollama Models (First Time Only)
 
 ```bash
 # Pull the code generation model
 docker exec automator-ollama ollama pull codellama:13b
 
-# Pull the embedding model (for semantic search)
+# Pull the embedding model
 docker exec automator-ollama ollama pull nomic-embed-text
 ```
 
 > **Note**: Model downloads can take several minutes depending on your internet speed.
 
-### Step 5: Verify Services
+---
+
+## ▶️ Running the System
+
+### Start All Services
+
+```bash
+docker-compose up -d
+```
+
+### Services Overview
+
+| Service | Port | URL | Description |
+|---------|------|-----|-------------|
+| Frontend | 3000 | http://localhost:3000 | React UI |
+| API Server | 8080 | http://localhost:8080 | REST API |
+| Temporal UI | 8233 | http://localhost:8233 | Workflow monitoring |
+| MySQL | 3306 | - | Database |
+| Temporal | 7233 | - | Workflow engine |
+| Ollama | 11434 | - | Local LLM |
+| Worker (VNC) | 5900 | vnc://localhost:5900 | Browser automation |
+
+### Verify Services
 
 ```bash
 # Check all containers are running
 docker-compose ps
 
-# Check API health
-curl http://localhost:8080/api/workflows
+# View logs
+docker-compose logs -f
 
-# View Temporal UI
-open http://localhost:8233
+# View specific service logs
+docker-compose logs -f api
+docker-compose logs -f worker
 ```
 
-### Step 6: Access the Application
+### Stop Services
 
-Open **http://localhost:3000** in your browser.
+```bash
+docker-compose down
+```
+
+### Reset Everything (Including Database)
+
+```bash
+docker-compose down -v
+docker-compose up -d
+```
 
 ---
 
-## 💻 Local Development Setup
-
-For development without Docker containers for the API/Worker/Frontend:
-
-### Step 1: Start Infrastructure Services
-
-```bash
-docker-compose up -d mysql temporal temporal-ui ollama
-```
-
-### Step 2: Wait for Services to Initialize
-
-```bash
-# Wait for MySQL to be ready
-docker-compose logs -f mysql | grep -m1 "ready for connections"
-
-# Wait for Temporal to be ready
-docker-compose logs -f temporal | grep -m1 "started"
-```
-
-### Step 3: Run API Server
-
-```bash
-# From project root
-go run ./cmd/api
-```
-
-### Step 4: Run Temporal Worker
-
-```bash
-# In a new terminal, from project root
-go run ./cmd/worker
-```
-
-### Step 5: Run Frontend
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-The frontend will be available at **http://localhost:5173** (Vite dev server).
-
----
-
-## 🔧 Configuration Reference
+## ⚙️ Configuration
 
 ### Environment Variables
 
@@ -216,16 +173,12 @@ The frontend will be available at **http://localhost:5173** (Vite dev server).
 |----------|---------|-------------|
 | `PORT` | `8080` | API server port |
 | `MYSQL_DSN` | See `.env.example` | MySQL connection string |
-| `TEMPORAL_HOST` | `localhost:7233` | Temporal server address |
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
+| `TEMPORAL_HOST` | `temporal:7233` | Temporal server address |
+| `OLLAMA_HOST` | `http://ollama:11434` | Ollama server URL |
 | `OLLAMA_MODEL` | `codellama:13b` | Ollama model for code generation |
 | `OPENAI_API_KEY` | - | OpenAI API key (optional) |
-| `OPENAI_MODEL` | `gpt-4-turbo-preview` | OpenAI model name |
 | `ANTHROPIC_API_KEY` | - | Anthropic API key (optional) |
-| `ANTHROPIC_MODEL` | `claude-3-sonnet-20240229` | Claude model name |
 | `GEMINI_API_KEY` | - | Google Gemini API key (optional) |
-| `GEMINI_MODEL` | `gemini-1.5-pro` | Gemini model name |
-| `SCREENSHOT_DIR` | `/tmp/screenshots` | Directory for screenshots |
 | `HEADLESS` | `true` | Run browser in headless mode |
 
 ### LLM Providers
@@ -241,53 +194,96 @@ The frontend will be available at **http://localhost:5173** (Vite dev server).
 
 ## 📖 Usage Guide
 
-### 1. Record Browser Session
+### Step 1: Access the UI
 
-Use the companion **Semantic Recorder** Chrome extension to capture browser interactions. The extension generates `hybrid_events.json` or `.bin` files containing:
-- **rrweb events**: DOM snapshots and mutations
-- **Custom events**: Clicks, inputs, copy/paste, navigation
+Open **http://localhost:3000** in your browser. You'll see the **Workflows Dashboard**.
 
-### 2. Upload Recording
+### Step 2: Create a New Workflow
 
-Upload your recording file through the UI:
-- Supported formats: `.json` and `.bin` (protobuf)
-- The system automatically parses and extracts semantic actions
+1. Click the **"New Workflow"** or **"Upload"** button
+2. Select your recording file:
+   - `.json` — Human-readable JSON format
+   - `.bin` — Protobuf binary format (smaller, faster)
+3. Enter a **name** for your workflow
+4. Click **Upload**
 
-### 3. Review Extracted Actions
+The system automatically parses your recording and extracts semantic actions.
 
-The system extracts:
-- **Click actions**: Button clicks, link navigation
-- **Input actions**: Text input, form filling
-- **Navigation**: URL changes, tab switches
-- **Clipboard**: Copy/paste operations
+### Step 3: Review Extracted Actions
 
-### 4. Configure Execution
+After upload, you'll see the **Workflow Detail** page showing:
 
-- **LLM Provider**: Select which AI generates the automation code
-- **Headless Mode**: Toggle visibility of browser during execution
-- **Parameters**: Edit dynamic values (dates, search terms, etc.)
+| Column | Description |
+|--------|-------------|
+| **#** | Action sequence number |
+| **Type** | Action type (click, input, navigation, etc.) |
+| **Target** | CSS selector or element description |
+| **Value** | Input value or URL (if applicable) |
 
-### 5. Execute Workflow
+**Extracted action types:**
+- 🖱️ **Click** — Button clicks, link clicks
+- ⌨️ **Input** — Text typed into fields
+- 🔗 **Navigation** — Page URL changes
+- 📋 **Copy/Paste** — Clipboard operations
+- 🔀 **Tab Switch** — Browser tab changes
 
-Click "Execute" and monitor real-time progress:
-- ⬜ **Gray**: Pending
-- 🔵 **Blue (pulsing)**: Running
-- ✅ **Green**: Success
-- 🔴 **Red**: Failed
+### Step 4: Configure Execution Settings
 
-### 6. Watch Live (Optional)
+Before running, configure:
 
-With `HEADLESS=false`, connect via VNC to watch automation:
-```bash
-# macOS
-open vnc://localhost:5900
+| Setting | Options | Description |
+|---------|---------|-------------|
+| **LLM Provider** | Ollama, OpenAI, Claude, Gemini | Which AI generates the Go Rod code |
+| **Headless** | On/Off | Hide or show browser during execution |
+| **Parameters** | Editable values | Modify dynamic inputs (search terms, dates) |
 
-# Linux
-vncviewer localhost:5900
+> **Tip**: Parameters are auto-detected from your recording. Edit them to run the same workflow with different values!
 
-# Windows
-# Use any VNC client to connect to localhost:5900
-```
+### Step 5: Execute the Workflow
+
+1. Click the **"Execute"** or **"Run"** button
+2. You'll be redirected to the **Execution Page**
+3. Watch the **workflow graph** update in real-time:
+
+| Status | Visual | Meaning |
+|--------|--------|---------|
+| Pending | ⬜ Gray | Waiting to execute |
+| Running | 🔵 Blue (pulsing) | Currently executing |
+| Success | ✅ Green | Completed successfully |
+| Failed | 🔴 Red | Error occurred |
+
+4. Click on any action node to see:
+   - Generated Go Rod code
+   - Screenshot (if captured)
+   - Error message (if failed)
+
+### Step 6: View Run History
+
+Navigate to **Runs** to see all workflow executions:
+- Filter by workflow or status
+- View detailed logs for each run
+- Re-run previous workflows
+
+### Step 7: Watch Live via VNC (Optional)
+
+To see the browser automation in real-time:
+
+1. Set `HEADLESS=false` in your `.env` file
+2. Restart the worker:
+   ```bash
+   docker-compose up -d worker
+   ```
+3. Connect via VNC:
+   ```bash
+   # macOS
+   open vnc://localhost:5900
+   
+   # Linux
+   vncviewer localhost:5900
+   
+   # Windows - use any VNC client
+   ```
+4. Watch the browser perform your recorded actions!
 
 ---
 
@@ -333,33 +329,44 @@ browser-automation-go/
 │   └── temporal/                # Workflows & activities
 ├── migrations/                  # MySQL schema migrations
 ├── frontend/                    # React + Vite + TypeScript UI
-│   ├── src/
-│   │   ├── pages/               # Page components
-│   │   └── ...
-│   ├── package.json
-│   └── vite.config.ts
-├── schema.proto                 # Protobuf schema for events
 ├── docker-compose.yml           # Container orchestration
 ├── Dockerfile.api               # API server container
 ├── Dockerfile.worker            # Worker container (with Chromium)
-├── .env.example                 # Environment template
-└── README.md
+└── .env.example                 # Environment template
 ```
 
 ---
 
 ## 🧪 Testing
 
-### Run Go Tests
+### Run Go Tests in Docker
 
 ```bash
-go test ./pkg/... -v
+# Build and run tests
+docker-compose run --rm api go test ./pkg/... -v
 ```
 
-### Test Event Parser
+### Test API Endpoints
 
 ```bash
-go run ./cmd/test_parser hybrid_events.json
+# List workflows
+curl http://localhost:8080/api/workflows
+
+# Upload a recording
+curl -X POST http://localhost:8080/api/workflows \
+  -F "file=@hybrid_events.json"
+```
+
+### View Worker Logs
+
+```bash
+docker-compose logs -f worker
+```
+
+### View All Logs
+
+```bash
+docker-compose logs -f
 ```
 
 ---
@@ -374,31 +381,28 @@ docker exec automator-ollama ollama pull codellama:13b
 
 ### Temporal Connection Failed
 
-Wait for Temporal to fully initialize:
 ```bash
-docker-compose logs -f temporal
-# Look for "started" message
-```
+# Check Temporal logs
+docker-compose logs temporal
 
-Access Temporal UI at http://localhost:8233 to verify.
+# Wait for startup and access UI
+open http://localhost:8233
+```
 
 ### Browser Actions Failing
 
-Check worker logs:
 ```bash
-docker logs automator-worker -f
+docker-compose logs -f worker
 ```
 
 ### Database Connection Issues
 
 ```bash
-# Verify MySQL is running
+# Check MySQL status
 docker-compose ps mysql
-
-# Check MySQL logs
 docker-compose logs mysql
 
-# Reset database (destructive)
+# Reset database
 docker-compose down -v
 docker-compose up -d
 ```
@@ -406,64 +410,32 @@ docker-compose up -d
 ### Frontend Not Loading
 
 ```bash
-# Check frontend container logs
-docker logs automator-frontend
-
-# Rebuild frontend
+docker-compose logs frontend
 docker-compose build frontend
 docker-compose up -d frontend
 ```
 
 ### VNC Not Connecting
 
-Ensure `HEADLESS=false` in your `.env`:
 ```bash
-# Restart worker with VNC enabled
-HEADLESS=false docker-compose up -d worker
+# Ensure HEADLESS=false in .env, then restart
+docker-compose up -d worker
 ```
 
----
-
-## 🔨 Building for Production
-
-### Build Docker Images
+### Rebuild All Services
 
 ```bash
-# Build all images
 docker-compose build
-
-# Build specific service
-docker-compose build api
-docker-compose build worker
-docker-compose build frontend
-```
-
-### Build Go Binaries
-
-```bash
-# API Server
-CGO_ENABLED=0 GOOS=linux go build -o bin/api ./cmd/api
-
-# Worker
-CGO_ENABLED=0 GOOS=linux go build -o bin/worker ./cmd/worker
-```
-
-### Build Frontend
-
-```bash
-cd frontend
-npm run build
-# Output in frontend/dist/
+docker-compose up -d
 ```
 
 ---
 
-## 📊 GPU Support for Ollama
+## 🎮 GPU Support
 
-To enable GPU acceleration for faster LLM inference:
+Enable GPU acceleration for faster LLM inference. Edit `docker-compose.yml`:
 
 ```yaml
-# In docker-compose.yml, uncomment:
 ollama:
   deploy:
     resources:
@@ -475,6 +447,7 @@ ollama:
 ```
 
 Then restart:
+
 ```bash
 docker-compose up -d ollama
 ```
